@@ -9,6 +9,7 @@ import {
   Modal,
   TextInput,
   Alert,
+  Dimensions,
 } from 'react-native';
 import { supabase, Transaction } from '@/lib/supabase';
 import {
@@ -18,7 +19,9 @@ import {
   Trash2,
   Filter,
   X,
+  Image as ImageIcon,
 } from 'lucide-react-native';
+import { Image } from 'react-native';
 
 export default function History() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -31,6 +34,8 @@ export default function History() {
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [selectedTransaction, setSelectedTransaction] =
     useState<Transaction | null>(null);
+  const [imageModalVisible, setImageModalVisible] = useState(false);
+  const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
 
   const [filterType, setFilterType] = useState<'all' | 'income' | 'expense'>(
     'all'
@@ -194,6 +199,17 @@ export default function History() {
             </Text>
             {item.note ? (
               <Text style={styles.transactionNote}>{item.note}</Text>
+            ) : null}
+            {item.attachment_url ? (
+              <TouchableOpacity
+                style={styles.attachmentBadge}
+                onPress={() => {
+                  setSelectedImageUri(item.attachment_url || null);
+                  setImageModalVisible(true);
+                }}>
+                <ImageIcon size={14} color="#3b82f6" />
+                <Text style={styles.attachmentBadgeText}>View Bill</Text>
+              </TouchableOpacity>
             ) : null}
           </View>
           <View style={styles.transactionRight}>
@@ -461,6 +477,27 @@ export default function History() {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={imageModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setImageModalVisible(false)}>
+        <View style={styles.imageModalOverlay}>
+          <TouchableOpacity
+            style={styles.imageModalClose}
+            onPress={() => setImageModalVisible(false)}>
+            <X size={24} color="#ffffff" />
+          </TouchableOpacity>
+          {selectedImageUri && (
+            <Image
+              source={{ uri: selectedImageUri }}
+              style={styles.imageModalImage}
+              resizeMode="contain"
+            />
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -712,5 +749,43 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  attachmentBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+  },
+  attachmentBadgeText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
+  },
+  imageModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageModalClose: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    zIndex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 20,
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageModalImage: {
+    width: Dimensions.get('window').width - 40,
+    height: Dimensions.get('window').height - 100,
   },
 });

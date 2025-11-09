@@ -34,6 +34,7 @@ export type Transaction = {
   amount: number;
   date: string;
   note: string;
+  attachment_url?: string | null;
   created_at: string;
   updated_at: string;
 };

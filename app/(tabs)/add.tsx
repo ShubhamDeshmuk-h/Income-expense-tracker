@@ -7,9 +7,19 @@ import {
   TouchableOpacity,
   ScrollView,
   Platform,
+  Image,
+  Alert,
 } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { router } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+import { X, Camera, Image as ImageIcon } from 'lucide-react-native';
+import {
+  checkLargeTransaction,
+  checkLowBalance,
+  sendTransactionNotification,
+} from '@/lib/notifications';
 
 const CATEGORIES = [
   'Salary',
@@ -35,6 +45,82 @@ export default function AddTransaction() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [attachmentUri, setAttachmentUri] = useState<string | null>(null);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+
+  const pickImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Please grant camera roll permissions to attach images');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setAttachmentUri(result.assets[0].uri);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to pick image');
+      console.error(error);
+    }
+  };
+
+  const takePhoto = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Please grant camera permissions to take photos');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        allowsEditing: true,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setAttachmentUri(result.assets[0].uri);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to take photo');
+      console.error(error);
+    }
+  };
+
+  const removeAttachment = () => {
+    setAttachmentUri(null);
+  };
+
+  const uploadAttachment = async (): Promise<string | null> => {
+    if (!attachmentUri) return null;
+
+    try {
+      setUploadingAttachment(true);
+      // For simplicity, we'll store the image locally and save the path
+      // In production, you might want to upload to Supabase Storage
+      const filename = `attachment_${Date.now()}.jpg`;
+      const destinationUri = `${FileSystem.documentDirectory}${filename}`;
+      
+      await FileSystem.copyAsync({
+        from: attachmentUri,
+        to: destinationUri,
+      });
+
+      return destinationUri;
+    } catch (error) {
+      console.error('Error uploading attachment:', error);
+      Alert.alert('Error', 'Failed to upload attachment');
+      return null;
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
 
   const handleSubmit = async () => {
     setError(null);
@@ -53,6 +139,9 @@ export default function AddTransaction() {
     setLoading(true);
 
     try {
+      // Upload attachment if exists
+      const attachmentUrl = await uploadAttachment();
+
       const { error: insertError } = await supabase.from('transactions').insert({
         type,
         mode,
@@ -60,14 +149,24 @@ export default function AddTransaction() {
         amount: parseFloat(amount),
         date,
         note: note || '',
+        attachment_url: attachmentUrl || null,
       });
 
       if (insertError) throw insertError;
+
+      // Check for alerts
+      const amountValue = parseFloat(amount);
+      await checkLargeTransaction(amountValue);
+      await checkLowBalance();
+      
+      // Send transaction notification (optional - can be disabled in settings)
+      // await sendTransactionNotification(type, amountValue, category);
 
       setSuccess(true);
       setCategory('');
       setAmount('');
       setNote('');
+      setAttachmentUri(null);
 
       setTimeout(() => {
         setSuccess(false);
@@ -225,12 +324,47 @@ export default function AddTransaction() {
           />
         </View>
 
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Bill Image (Optional)</Text>
+          {attachmentUri ? (
+            <View style={styles.attachmentContainer}>
+              <Image source={{ uri: attachmentUri }} style={styles.attachmentImage} />
+              <TouchableOpacity
+                style={styles.removeAttachmentButton}
+                onPress={removeAttachment}>
+                <X size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.attachmentButtons}>
+              <TouchableOpacity
+                style={styles.attachmentButton}
+                onPress={pickImage}
+                disabled={uploadingAttachment}>
+                <ImageIcon size={20} color="#3b82f6" />
+                <Text style={styles.attachmentButtonText}>Choose from Gallery</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.attachmentButton}
+                onPress={takePhoto}
+                disabled={uploadingAttachment}>
+                <Camera size={20} color="#3b82f6" />
+                <Text style={styles.attachmentButtonText}>Take Photo</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
         <TouchableOpacity
           style={[styles.submitButton, loading && styles.submitButtonDisabled]}
           onPress={handleSubmit}
-          disabled={loading}>
+          disabled={loading || uploadingAttachment}>
           <Text style={styles.submitButtonText}>
-            {loading ? 'Adding...' : 'Add Transaction'}
+            {loading || uploadingAttachment
+              ? uploadingAttachment
+                ? 'Uploading...'
+                : 'Adding...'
+              : 'Add Transaction'}
           </Text>
         </TouchableOpacity>
       </View>
@@ -369,5 +503,57 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  attachmentButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  attachmentButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: '#3b82f6',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  attachmentButtonText: {
+    color: '#3b82f6',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  attachmentContainer: {
+    position: 'relative',
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#e5e7eb',
+  },
+  attachmentImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  removeAttachmentButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: '#ef4444',
+    borderRadius: 20,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
   },
 });
