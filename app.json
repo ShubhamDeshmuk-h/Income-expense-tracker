@@ -2,7 +2,8 @@
   "expo": {
     "name": "TrackExpence",
     "slug": "TrackExpence",
-    "version": "1.0.0",
+    "version": "1.0.1",
+    "runtimeVersion": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "light",
@@ -16,7 +17,8 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.TrackExpence.app"
+      "bundleIdentifier": "com.TrackExpence.app",
+      "buildNumber": "2"
     },
     "android": {
       "adaptiveIcon": {
@@ -24,6 +26,7 @@
         "backgroundColor": "#3b82f6"
       },
       "package": "com.TrackExpence.app",
+      "versionCode": 2,
       "permissions": [
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
@@ -33,6 +36,11 @@
     },
     "web": {
       "favicon": "./assets/images/favicon.png"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/your-project-id",
+      "enabled": true,
+      "fallbackToCacheTimeout": 0
     },
     "plugins": [
       [

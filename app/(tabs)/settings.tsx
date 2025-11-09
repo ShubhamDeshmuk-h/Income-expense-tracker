@@ -112,14 +112,28 @@ export default function Settings() {
       return;
     }
 
-    if (settingPin && pinInput !== confirmPin) {
-      Alert.alert('Error', 'PINs do not match');
-      return;
-    }
-
     try {
+      // If PIN is already enabled, verify current PIN first
+      if (pinEnabled && !settingPin) {
+        const currentPin = await SecureStore.getItemAsync(PIN_KEY);
+        if (pinInput !== currentPin) {
+          Alert.alert('Error', 'Incorrect PIN');
+          setPinInput('');
+          return;
+        }
+        // Current PIN verified, now ask for new PIN
+        setSettingPin(true);
+        setPinInput('');
+        return;
+      }
+
+      // Setting or confirming new PIN
       if (settingPin) {
-        // Setting new PIN
+        if (pinInput !== confirmPin) {
+          Alert.alert('Error', 'PINs do not match');
+          return;
+        }
+        // Save the new PIN
         await SecureStore.setItemAsync(PIN_KEY, pinInput);
         setPinEnabled(true);
         setPinModalVisible(false);
@@ -128,16 +142,15 @@ export default function Settings() {
         setSettingPin(false);
         Alert.alert('Success', 'PIN set successfully');
       } else {
-        // Verifying PIN to change it
-        const currentPin = await SecureStore.getItemAsync(PIN_KEY);
-        if (pinInput === currentPin) {
-          setSettingPin(true);
-          setPinInput('');
-        } else {
-          Alert.alert('Error', 'Incorrect PIN');
-        }
+        // First time setting PIN, move to confirmation
+        setSettingPin(true);
+        setConfirmPin('');
+        const firstPin = pinInput;
+        setPinInput('');
+        Alert.alert('Confirm PIN', 'Please confirm your PIN');
       }
     } catch (error) {
+      console.error('PIN setting error:', error);
       Alert.alert('Error', 'Failed to set PIN');
     }
   };

@@ -29,7 +29,8 @@
       "extends": "production",
       "android": {
         "buildType": "app-bundle"
-      }
+      },
+      "channel": "production-aab"
     }
   },
   "submit": {
