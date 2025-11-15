@@ -219,16 +219,25 @@ export default function Settings() {
           t.mode,
           t.category,
           t.amount,
-          (t.note || '').replace(/,/g, ';'),
+          (t.note || '').toString().replace(/,/g, ';'),
         ];
         csvRows.push(row.join(','));
       });
 
       const csvContent = csvRows.join('\n');
       const filename = `transactions_${new Date().toISOString().split('T')[0]}.csv`;
-      const fileUri = FileSystem.documentDirectory + filename;
+      // Ensure a valid directory exists
+      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+      if (!baseDir) throw new Error('No writable file system directory available');
+      try {
+        await FileSystem.getInfoAsync(baseDir);
+      } catch (err) {
+        // Try to create directory (unlikely on managed expo, but defensive)
+        await FileSystem.makeDirectoryAsync(baseDir, { intermediates: true });
+      }
+      const fileUri = `${baseDir}${filename}`;
 
-      await FileSystem.writeAsStringAsync(fileUri, csvContent);
+      await FileSystem.writeAsStringAsync(fileUri, csvContent, { encoding: FileSystem.EncodingType.UTF8 });
 
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(fileUri);
@@ -236,8 +245,9 @@ export default function Settings() {
         Alert.alert('Success', `File saved to: ${fileUri}`);
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to export transactions');
-      console.error(error);
+      const msg = error instanceof Error ? error.message : String(error);
+      Alert.alert('Error', `Failed to export transactions: ${msg}`);
+      console.error('exportToCSV error:', error);
     } finally {
       setLoading(false);
     }
@@ -275,7 +285,9 @@ export default function Settings() {
       // Generate base64 string
       const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
       const filename = `transactions_${new Date().toISOString().split('T')[0]}.xlsx`;
-      const fileUri = FileSystem.documentDirectory + filename;
+      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+      if (!baseDir) throw new Error('No writable file system directory available');
+      const fileUri = `${baseDir}${filename}`;
 
       await FileSystem.writeAsStringAsync(fileUri, wbout, {
         encoding: FileSystem.EncodingType.Base64,
@@ -287,8 +299,9 @@ export default function Settings() {
         Alert.alert('Success', `File saved to: ${fileUri}`);
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to export transactions');
-      console.error(error);
+      const msg = error instanceof Error ? error.message : String(error);
+      Alert.alert('Error', `Failed to export transactions: ${msg}`);
+      console.error('exportToExcel error:', error);
     } finally {
       setLoading(false);
     }
@@ -297,10 +310,7 @@ export default function Settings() {
   const createBackup = async () => {
     try {
       setLoading(true);
-      const { data: transactions, error } = await supabase
-        .from('transactions')
-        .select('*');
-
+      const { data: transactions, error } = await supabase.from('transactions').select('*');
       if (error) throw error;
 
       const backup = {
@@ -311,9 +321,11 @@ export default function Settings() {
 
       const backupJson = JSON.stringify(backup, null, 2);
       const filename = `backup_${new Date().toISOString().split('T')[0]}.json`;
-      const fileUri = FileSystem.documentDirectory + filename;
+      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+      if (!baseDir) throw new Error('No writable file system directory available');
+      const fileUri = `${baseDir}${filename}`;
 
-      await FileSystem.writeAsStringAsync(fileUri, backupJson);
+      await FileSystem.writeAsStringAsync(fileUri, backupJson, { encoding: FileSystem.EncodingType.UTF8 });
 
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(fileUri);
@@ -321,8 +333,9 @@ export default function Settings() {
         Alert.alert('Success', `Backup saved to: ${fileUri}`);
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to create backup');
-      console.error(error);
+      const msg = error instanceof Error ? error.message : String(error);
+      Alert.alert('Error', `Failed to create backup: ${msg}`);
+      console.error('createBackup error:', error);
     } finally {
       setLoading(false);
     }
