@@ -1,287 +1,248 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   RefreshControl,
+  TouchableOpacity,
 } from 'react-native';
-import { supabase, Balance } from '@/lib/supabase';
-import { Wallet, CreditCard, TrendingUp, TrendingDown } from 'lucide-react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from 'expo-router';
+import {
+  Wallet,
+  CreditCard,
+  TrendingUp,
+  TrendingDown,
+  RefreshCw,
+} from 'lucide-react-native';
+import { getBalanceSummary, getTransactions, type BalanceSummary, type Transaction } from '@/lib/db';
+import { useCurrencyPreference } from '@/hooks/useCurrencyPreference';
+import { formatAmount } from '@/lib/currency';
+import { theme } from '@/lib/theme';
 
 export default function Dashboard() {
-  const [balances, setBalances] = useState<Balance[]>([]);
-  const [totalIncome, setTotalIncome] = useState(0);
-  const [totalExpense, setTotalExpense] = useState(0);
+  const insets = useSafeAreaInsets();
+  const currency = useCurrencyPreference();
+  const [balances, setBalances] = useState<BalanceSummary[]>([]);
+  const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const fetchBalances = async () => {
+  const fetchData = async () => {
     try {
-      setError(null);
-      const { data, error } = await supabase
-        .from('balances')
-        .select('*')
-        .order('mode');
-
-      if (error) throw error;
-
-      if (data) {
-        setBalances(data);
-        const income = data.reduce((sum, b) => sum + Number(b.total_income), 0);
-        const expense = data.reduce(
-          (sum, b) => sum + Number(b.total_expense),
-          0
-        );
-        setTotalIncome(income);
-        setTotalExpense(expense);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch balances');
+      const [bal, txns] = await Promise.all([
+        getBalanceSummary(),
+        getTransactions(),
+      ]);
+      setBalances(bal);
+      setRecentTransactions(txns.slice(0, 5));
+    } catch (e) {
+      console.error(e);
     }
   };
 
+  useFocusEffect(
+    useCallback(() => {
+      fetchData();
+    }, [])
+  );
+
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchBalances();
+    await fetchData();
     setRefreshing(false);
   };
 
-  useEffect(() => {
-    fetchBalances();
-  }, []);
-
   const cashBalance = balances.find((b) => b.mode === 'cash');
   const bankBalance = balances.find((b) => b.mode === 'bank');
+  const totalIncome = balances.reduce((s, b) => s + Number(b.total_income), 0);
+  const totalExpense = balances.reduce((s, b) => s + Number(b.total_expense), 0);
+  const totalBalance = balances.reduce(
+    (s, b) => s + Number(b.current_balance),
+    0
+  );
 
   return (
     <ScrollView
       style={styles.container}
       refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={theme.colors.primary}
+        />
       }>
-      <View style={styles.header}>
-        <Text style={styles.title}>Finance Tracker</Text>
-        <Text style={styles.subtitle}>Your Personal Budget Manager</Text>
+      {/* Header */}
+      <LinearGradient
+        colors={[theme.colors.primaryDark, theme.colors.primary]}
+        style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 12 }]}>
+        <Text style={styles.headerGreeting}>VaultFlow</Text>
+        <Text style={styles.headerSub}>Your financial overview</Text>
+
+        {/* Total Balance Card */}
+        <View style={styles.balanceCard}>
+          <Text style={styles.balanceLabel}>Total Balance</Text>
+          <Text style={styles.balanceValue}>{formatAmount(totalBalance, currency)}</Text>
+          <View style={styles.incomExpRow}>
+            <View style={styles.incomExpItem}>
+              <TrendingUp size={16} color={theme.colors.income} />
+              <Text style={styles.incomeText}>{formatAmount(totalIncome, currency)}</Text>
+              <Text style={styles.incomeLabel}>Income</Text>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.incomExpItem}>
+              <TrendingDown size={16} color={theme.colors.expense} />
+              <Text style={styles.expenseText}>{formatAmount(totalExpense, currency)}</Text>
+              <Text style={styles.expenseLabel}>Expense</Text>
+            </View>
+          </View>
+        </View>
+      </LinearGradient>
+
+      {/* Balance Modes */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>By Mode</Text>
+        <View style={styles.modeRow}>
+          <View style={[styles.modeCard, theme.shadow.md]}>
+            <View style={[styles.modeIconBox, { backgroundColor: theme.colors.infoLight }]}>
+              <Wallet size={20} color={theme.colors.info} />
+            </View>
+            <Text style={styles.modeName}>Cash</Text>
+            <Text style={styles.modeBalance}>
+              {formatAmount(cashBalance ? Number(cashBalance.current_balance) : 0, currency)}
+            </Text>
+            <View style={styles.modeStats}>
+              <Text style={styles.modeStat}>↑ {formatAmount(cashBalance ? Number(cashBalance.total_income) : 0, currency)}</Text>
+              <Text style={[styles.modeStat, { color: theme.colors.expense }]}>↓ {formatAmount(cashBalance ? Number(cashBalance.total_expense) : 0, currency)}</Text>
+            </View>
+          </View>
+
+          <View style={[styles.modeCard, theme.shadow.md]}>
+            <View style={[styles.modeIconBox, { backgroundColor: theme.colors.accentLight }]}>
+              <CreditCard size={20} color={theme.colors.accent} />
+            </View>
+            <Text style={styles.modeName}>Bank</Text>
+            <Text style={styles.modeBalance}>
+              {formatAmount(bankBalance ? Number(bankBalance.current_balance) : 0, currency)}
+            </Text>
+            <View style={styles.modeStats}>
+              <Text style={styles.modeStat}>↑ {formatAmount(bankBalance ? Number(bankBalance.total_income) : 0, currency)}</Text>
+              <Text style={[styles.modeStat, { color: theme.colors.expense }]}>↓ {formatAmount(bankBalance ? Number(bankBalance.total_expense) : 0, currency)}</Text>
+            </View>
+          </View>
+        </View>
       </View>
 
-      {error && (
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
-      )}
-
-      <View style={styles.summarySection}>
-        <View style={styles.summaryCard}>
-          <View style={styles.summaryIconContainer}>
-            <TrendingUp size={24} color="#10b981" />
+      {/* Recent Transactions */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Recent Transactions</Text>
+        {recentTransactions.length === 0 ? (
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyText}>No transactions yet. Tap + to add one!</Text>
           </View>
-          <Text style={styles.summaryLabel}>Total Income</Text>
-          <Text style={[styles.summaryAmount, styles.incomeText]}>
-            ₹{totalIncome.toFixed(2)}
-          </Text>
-        </View>
-
-        <View style={styles.summaryCard}>
-          <View style={styles.summaryIconContainer}>
-            <TrendingDown size={24} color="#ef4444" />
-          </View>
-          <Text style={styles.summaryLabel}>Total Expenses</Text>
-          <Text style={[styles.summaryAmount, styles.expenseText]}>
-            ₹{totalExpense.toFixed(2)}
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.balanceSection}>
-        <Text style={styles.sectionTitle}>Current Balances</Text>
-
-        <View style={styles.balanceCard}>
-          <View style={styles.balanceHeader}>
-            <View style={styles.balanceIconWrapper}>
-              <Wallet size={24} color="#3b82f6" />
-            </View>
-            <Text style={styles.balanceTitle}>In-hand Cash</Text>
-          </View>
-          <Text style={styles.balanceAmount}>
-            ₹{cashBalance ? Number(cashBalance.current_balance).toFixed(2) : '0.00'}
-          </Text>
-          <View style={styles.balanceDetails}>
-            <View style={styles.balanceDetailItem}>
-              <Text style={styles.balanceDetailLabel}>Income</Text>
-              <Text style={styles.balanceDetailValue}>
-                ₹{cashBalance ? Number(cashBalance.total_income).toFixed(2) : '0.00'}
+        ) : (
+          recentTransactions.map((tx) => (
+            <View key={tx.id} style={[styles.txRow, theme.shadow.sm]}>
+              <View style={[
+                styles.txIcon,
+                { backgroundColor: tx.type === 'income' ? theme.colors.incomeLight : theme.colors.expenseLight }
+              ]}>
+                {tx.type === 'income'
+                  ? <TrendingUp size={16} color={theme.colors.income} />
+                  : <TrendingDown size={16} color={theme.colors.expense} />
+                }
+              </View>
+              <View style={styles.txInfo}>
+                <Text style={styles.txCategory}>{tx.category}</Text>
+                <Text style={styles.txNote} numberOfLines={1}>{tx.note || tx.date}</Text>
+              </View>
+              <Text style={[
+                styles.txAmount,
+                { color: tx.type === 'income' ? theme.colors.income : theme.colors.expense }
+              ]}>
+                {tx.type === 'income' ? '+' : '-'}{formatAmount(Number(tx.amount), currency)}
               </Text>
             </View>
-            <View style={styles.balanceDetailItem}>
-              <Text style={styles.balanceDetailLabel}>Expense</Text>
-              <Text style={styles.balanceDetailValue}>
-                ₹{cashBalance ? Number(cashBalance.total_expense).toFixed(2) : '0.00'}
-              </Text>
-            </View>
-          </View>
-        </View>
-
-        <View style={styles.balanceCard}>
-          <View style={styles.balanceHeader}>
-            <View style={styles.balanceIconWrapper}>
-              <CreditCard size={24} color="#8b5cf6" />
-            </View>
-            <Text style={styles.balanceTitle}>Bank / Online</Text>
-          </View>
-          <Text style={styles.balanceAmount}>
-            ₹{bankBalance ? Number(bankBalance.current_balance).toFixed(2) : '0.00'}
-          </Text>
-          <View style={styles.balanceDetails}>
-            <View style={styles.balanceDetailItem}>
-              <Text style={styles.balanceDetailLabel}>Income</Text>
-              <Text style={styles.balanceDetailValue}>
-                ₹{bankBalance ? Number(bankBalance.total_income).toFixed(2) : '0.00'}
-              </Text>
-            </View>
-            <View style={styles.balanceDetailItem}>
-              <Text style={styles.balanceDetailLabel}>Expense</Text>
-              <Text style={styles.balanceDetailValue}>
-                ₹{bankBalance ? Number(bankBalance.total_expense).toFixed(2) : '0.00'}
-              </Text>
-            </View>
-          </View>
-        </View>
+          ))
+        )}
       </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
+  container: { flex: 1, backgroundColor: theme.colors.background },
   header: {
-    backgroundColor: '#3b82f6',
-    padding: 24,
-    paddingTop: 60,
-    paddingBottom: 32,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.xxl,
+    borderBottomLeftRadius: theme.radius.xxl,
+    borderBottomRightRadius: theme.radius.xxl,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#ffffff',
-    marginBottom: 4,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#dbeafe',
-  },
-  errorContainer: {
-    margin: 16,
-    padding: 12,
-    backgroundColor: '#fef2f2',
-    borderRadius: 8,
-    borderLeftWidth: 4,
-    borderLeftColor: '#ef4444',
-  },
-  errorText: {
-    color: '#991b1b',
-    fontSize: 14,
-  },
-  summarySection: {
-    flexDirection: 'row',
-    padding: 16,
-    gap: 12,
-  },
-  summaryCard: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  summaryIconContainer: {
-    marginBottom: 8,
-  },
-  summaryLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginBottom: 4,
-  },
-  summaryAmount: {
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  incomeText: {
-    color: '#10b981',
-  },
-  expenseText: {
-    color: '#ef4444',
-  },
-  balanceSection: {
-    padding: 16,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#111827',
-    marginBottom: 16,
-  },
+  headerGreeting: { ...theme.typography.title, color: '#fff', marginBottom: 2 },
+  headerSub: { ...theme.typography.subtitle, color: 'rgba(255,255,255,0.7)', marginBottom: 20 },
   balanceCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 20,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: theme.radius.xl,
+    padding: theme.spacing.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
   },
-  balanceHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
+  balanceLabel: { ...theme.typography.label, color: 'rgba(255,255,255,0.8)', marginBottom: 4 },
+  balanceValue: { ...theme.typography.hero, color: '#fff', marginBottom: 16 },
+  incomExpRow: { flexDirection: 'row', alignItems: 'center' },
+  incomExpItem: { flex: 1, alignItems: 'center', gap: 4 },
+  divider: { width: 1, height: 40, backgroundColor: 'rgba(255,255,255,0.25)' },
+  incomeText: { ...theme.typography.heading, color: theme.colors.income },
+  incomeLabel: { ...theme.typography.caption, color: 'rgba(255,255,255,0.7)' },
+  expenseText: { ...theme.typography.heading, color: theme.colors.expense },
+  expenseLabel: { ...theme.typography.caption, color: 'rgba(255,255,255,0.7)' },
+  section: { margin: theme.spacing.lg, marginTop: theme.spacing.md },
+  sectionTitle: { ...theme.typography.heading, color: theme.colors.text, marginBottom: theme.spacing.sm },
+  modeRow: { flexDirection: 'row', gap: theme.spacing.sm },
+  modeCard: {
+    flex: 1,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
   },
-  balanceIconWrapper: {
+  modeIconBox: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#f3f4f6',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    marginBottom: theme.spacing.sm,
   },
-  balanceTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#111827',
+  modeName: { ...theme.typography.label, color: theme.colors.textSecondary, marginBottom: 4 },
+  modeBalance: { ...theme.typography.heading, color: theme.colors.text, marginBottom: theme.spacing.sm },
+  modeStats: { gap: 2 },
+  modeStat: { ...theme.typography.caption, color: theme.colors.income },
+  emptyBox: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.xl,
+    alignItems: 'center',
   },
-  balanceAmount: {
-    fontSize: 32,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 16,
-  },
-  balanceDetails: {
+  emptyText: { ...theme.typography.body, color: theme.colors.textMuted, textAlign: 'center' },
+  txRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
+    alignItems: 'center',
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
   },
-  balanceDetailItem: {
-    flex: 1,
+  txIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: theme.spacing.sm,
   },
-  balanceDetailLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginBottom: 4,
-  },
-  balanceDetailValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#374151',
-  },
+  txInfo: { flex: 1 },
+  txCategory: { ...theme.typography.label, color: theme.colors.text },
+  txNote: { ...theme.typography.caption, color: theme.colors.textMuted },
+  txAmount: { ...theme.typography.label, fontWeight: '700' },
 });

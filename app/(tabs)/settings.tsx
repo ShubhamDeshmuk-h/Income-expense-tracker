@@ -8,10 +8,12 @@ import {
   Switch,
   TextInput,
   Alert,
-  Modal,
   Platform,
+  DeviceEventEmitter,
 } from 'react-native';
-import { supabase, Transaction } from '@/lib/supabase';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as FileSystem from 'expo-file-system';
@@ -26,316 +28,170 @@ import {
   Shield,
   Eye,
   EyeOff,
+  Globe,
+  Trash2,
 } from 'lucide-react-native';
-import * as XLSX from 'xlsx';
+import {
+  clearAllTransactions,
+  getTransactions,
+  mergeTransactions,
+} from '@/lib/db';
 import {
   scheduleMonthlySummaryNotification,
   requestNotificationPermissions,
 } from '@/lib/notifications';
+import {
+  getCurrencyPreference,
+  setCurrencyPreference,
+  DEFAULT_CURRENCY,
+  ONBOARDING_KEY,
+  SETTINGS_KEY,
+  PIN_KEY,
+  type CurrencyPreference,
+} from '@/lib/preferences';
+import { CURRENCY_OPTIONS, formatAmount, type CurrencyOption } from '@/lib/currency';
 import UpdateChecker from '@/components/UpdateChecker';
+import { theme } from '@/lib/theme';
 
-const PIN_KEY = 'user_pin';
-const SETTINGS_KEY = 'user_settings';
-
-interface UserSettings {
-  pinHash?: string;
-  biometricEnabled: boolean;
-  monthlySummaryAlerts: boolean;
-  largeTransactionThreshold: number;
-  largeTransactionAlerts: boolean;
-  lowBalanceThreshold: number;
-  lowBalanceAlerts: boolean;
-}
+const DEFAULT_SETTINGS = {
+  monthlySummaryAlerts: true,
+  largeTransactionThreshold: 10000,
+  largeTransactionAlerts: true,
+  lowBalanceThreshold: 1000,
+  lowBalanceAlerts: true,
+};
 
 export default function Settings() {
-  const [settings, setSettings] = useState<UserSettings>({
-    biometricEnabled: false,
-    monthlySummaryAlerts: true,
-    largeTransactionThreshold: 10000,
-    largeTransactionAlerts: true,
-    lowBalanceThreshold: 1000,
-    lowBalanceAlerts: true,
-  });
+  const insets = useSafeAreaInsets();
+  const [currency, setCurrency] = useState<CurrencyOption>(DEFAULT_CURRENCY);
+  const [currencySearch, setCurrencySearch] = useState('');
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [pinEnabled, setPinEnabled] = useState(false);
-  const [pinModalVisible, setPinModalVisible] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
-  const [settingPin, setSettingPin] = useState(false);
+  const [showPinForm, setShowPinForm] = useState(false);
   const [showPin, setShowPin] = useState(false);
-  const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
 
   useEffect(() => {
     loadSettings();
-    checkBiometricAvailability();
+    checkBiometrics();
   }, []);
-
-  const checkBiometricAvailability = async () => {
-    const compatible = await LocalAuthentication.hasHardwareAsync();
-    const enrolled = await LocalAuthentication.isEnrolledAsync();
-    setBiometricAvailable(compatible && enrolled);
-  };
 
   const loadSettings = async () => {
     try {
+      const savedSettings = await SecureStore.getItemAsync(SETTINGS_KEY);
+      if (savedSettings) {
+        setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(savedSettings) });
+      }
       const pin = await SecureStore.getItemAsync(PIN_KEY);
       setPinEnabled(!!pin);
 
-      const savedSettings = await SecureStore.getItemAsync(SETTINGS_KEY);
-      if (savedSettings) {
-        setSettings(JSON.parse(savedSettings));
-      }
-    } catch (error) {
-      console.error('Error loading settings:', error);
+      const bioEnabled = await SecureStore.getItemAsync('biometric_enabled');
+      setBiometricEnabled(bioEnabled === 'true');
+
+      const savedCurrency = await getCurrencyPreference();
+      setCurrency(savedCurrency);
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  const saveSettings = async (newSettings: UserSettings) => {
-    try {
-      await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(newSettings));
-      setSettings(newSettings);
-      
-      // Schedule notifications if monthly alerts are enabled
-      if (newSettings.monthlySummaryAlerts) {
-        await requestNotificationPermissions();
-        await scheduleMonthlySummaryNotification();
-      }
-    } catch (error) {
-      console.error('Error saving settings:', error);
-      Alert.alert('Error', 'Failed to save settings');
-    }
+  const checkBiometrics = async () => {
+    const available = await LocalAuthentication.hasHardwareAsync();
+    setBiometricAvailable(available);
+  };
+
+  const saveSettings = async (next: typeof DEFAULT_SETTINGS) => {
+    setSettings(next);
+    await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(next));
+    await scheduleMonthlySummaryNotification();
+  };
+
+  const toggleSetting = (key: keyof typeof DEFAULT_SETTINGS, val: boolean) => {
+    saveSettings({ ...settings, [key]: val });
+  };
+
+  const updateThreshold = (key: keyof typeof DEFAULT_SETTINGS, val: string) => {
+    const num = parseFloat(val);
+    if (!isNaN(num)) saveSettings({ ...settings, [key]: num });
+  };
+
+  const handleSaveCurrency = async (opt: CurrencyOption) => {
+    await setCurrencyPreference(opt);
+    setCurrency(opt);
+    Alert.alert('Currency Updated', `Amounts will now show in ${opt.currencyCode}.`);
   };
 
   const handleSetPin = async () => {
     if (pinInput.length < 4) {
-      Alert.alert('Error', 'PIN must be at least 4 digits');
+      Alert.alert('Too Short', 'PIN must be at least 4 digits.');
       return;
     }
-
-    try {
-      // If PIN is already enabled, verify current PIN first
-      if (pinEnabled && !settingPin) {
-        const currentPin = await SecureStore.getItemAsync(PIN_KEY);
-        if (pinInput !== currentPin) {
-          Alert.alert('Error', 'Incorrect PIN');
-          setPinInput('');
-          return;
-        }
-        // Current PIN verified, now ask for new PIN
-        setSettingPin(true);
-        setPinInput('');
-        return;
-      }
-
-      // Setting or confirming new PIN
-      if (settingPin) {
-        if (pinInput !== confirmPin) {
-          Alert.alert('Error', 'PINs do not match');
-          return;
-        }
-        // Save the new PIN
-        await SecureStore.setItemAsync(PIN_KEY, pinInput);
-        setPinEnabled(true);
-        setPinModalVisible(false);
-        setPinInput('');
-        setConfirmPin('');
-        setSettingPin(false);
-        Alert.alert('Success', 'PIN set successfully');
-      } else {
-        // First time setting PIN, move to confirmation
-        setSettingPin(true);
-        setConfirmPin('');
-        const firstPin = pinInput;
-        setPinInput('');
-        Alert.alert('Confirm PIN', 'Please confirm your PIN');
-      }
-    } catch (error) {
-      console.error('PIN setting error:', error);
-      Alert.alert('Error', 'Failed to set PIN');
+    if (pinInput !== confirmPin) {
+      Alert.alert('Mismatch', 'PINs do not match.');
+      return;
     }
+    await SecureStore.setItemAsync(PIN_KEY, pinInput);
+    setPinEnabled(true);
+    setShowPinForm(false);
+    setPinInput('');
+    setConfirmPin('');
+    Alert.alert('PIN Set', 'App lock is now enabled.');
   };
 
   const handleDisablePin = async () => {
-    Alert.alert(
-      'Disable PIN',
-      'Are you sure you want to disable PIN protection?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Disable',
-          style: 'destructive',
-          onPress: async () => {
-            await SecureStore.deleteItemAsync(PIN_KEY);
-            setPinEnabled(false);
-          },
+    Alert.alert('Disable PIN', 'Remove PIN lock?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          await SecureStore.deleteItemAsync(PIN_KEY);
+          await SecureStore.setItemAsync('biometric_enabled', 'false');
+          setPinEnabled(false);
+          setBiometricEnabled(false);
         },
-      ]
-    );
+      },
+    ]);
   };
 
-  const handleEnableBiometric = async () => {
-    if (!biometricAvailable) {
-      Alert.alert('Error', 'Biometric authentication is not available on this device');
+  const toggleBiometric = async (val: boolean) => {
+    if (val && !pinEnabled) {
+      Alert.alert('Set PIN First', 'You need to set a PIN before enabling biometrics.');
       return;
     }
-
-    try {
-      const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: 'Authenticate to enable biometric lock',
-        cancelLabel: 'Cancel',
-      });
-
-      if (result.success) {
-        await saveSettings({ ...settings, biometricEnabled: true });
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to enable biometric authentication');
-    }
-  };
-
-  const exportToCSV = async () => {
-    try {
-      setLoading(true);
-      const { data: transactions, error } = await supabase
-        .from('transactions')
-        .select('*')
-        .order('date', { ascending: false });
-
-      if (error) throw error;
-
-      if (!transactions || transactions.length === 0) {
-        Alert.alert('Info', 'No transactions to export');
-        return;
-      }
-
-      // Create CSV content
-      const headers = ['Date', 'Type', 'Mode', 'Category', 'Amount', 'Note'];
-      const csvRows = [headers.join(',')];
-
-      transactions.forEach((t) => {
-        const row = [
-          t.date,
-          t.type,
-          t.mode,
-          t.category,
-          t.amount,
-          (t.note || '').toString().replace(/,/g, ';'),
-        ];
-        csvRows.push(row.join(','));
-      });
-
-      const csvContent = csvRows.join('\n');
-      const filename = `transactions_${new Date().toISOString().split('T')[0]}.csv`;
-      // Ensure a valid directory exists
-      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
-      if (!baseDir) throw new Error('No writable file system directory available');
-      try {
-        await FileSystem.getInfoAsync(baseDir);
-      } catch (err) {
-        // Try to create directory (unlikely on managed expo, but defensive)
-        await FileSystem.makeDirectoryAsync(baseDir, { intermediates: true });
-      }
-      const fileUri = `${baseDir}${filename}`;
-
-      await FileSystem.writeAsStringAsync(fileUri, csvContent, { encoding: FileSystem.EncodingType.UTF8 });
-
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri);
-      } else {
-        Alert.alert('Success', `File saved to: ${fileUri}`);
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      Alert.alert('Error', `Failed to export transactions: ${msg}`);
-      console.error('exportToCSV error:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const exportToExcel = async () => {
-    try {
-      setLoading(true);
-      const { data: transactions, error } = await supabase
-        .from('transactions')
-        .select('*')
-        .order('date', { ascending: false });
-
-      if (error) throw error;
-
-      if (!transactions || transactions.length === 0) {
-        Alert.alert('Info', 'No transactions to export');
-        return;
-      }
-
-      // Prepare data for Excel
-      const excelData = transactions.map((t) => ({
-        Date: t.date,
-        Type: t.type,
-        Mode: t.mode,
-        Category: t.category,
-        Amount: t.amount,
-        Note: t.note || '',
-      }));
-
-      const ws = XLSX.utils.json_to_sheet(excelData);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Transactions');
-
-      // Generate base64 string
-      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
-      const filename = `transactions_${new Date().toISOString().split('T')[0]}.xlsx`;
-      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
-      if (!baseDir) throw new Error('No writable file system directory available');
-      const fileUri = `${baseDir}${filename}`;
-
-      await FileSystem.writeAsStringAsync(fileUri, wbout, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri);
-      } else {
-        Alert.alert('Success', `File saved to: ${fileUri}`);
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      Alert.alert('Error', `Failed to export transactions: ${msg}`);
-      console.error('exportToExcel error:', error);
-    } finally {
-      setLoading(false);
-    }
+    await SecureStore.setItemAsync('biometric_enabled', val ? 'true' : 'false');
+    setBiometricEnabled(val);
   };
 
   const createBackup = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const { data: transactions, error } = await supabase.from('transactions').select('*');
-      if (error) throw error;
-
+      const transactions = await getTransactions();
+      const savedSettings = await SecureStore.getItemAsync(SETTINGS_KEY);
+      const savedCurrency = await getCurrencyPreference();
       const backup = {
-        transactions: transactions || [],
+        app: 'VaultFlow',
+        version: '2.0',
         backupDate: new Date().toISOString(),
-        version: '1.0',
+        transactions,
+        settings: savedSettings ? JSON.parse(savedSettings) : DEFAULT_SETTINGS,
+        currency: savedCurrency,
       };
 
-      const backupJson = JSON.stringify(backup, null, 2);
-      const filename = `backup_${new Date().toISOString().split('T')[0]}.json`;
-      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
-      if (!baseDir) throw new Error('No writable file system directory available');
-      const fileUri = `${baseDir}${filename}`;
-
-      await FileSystem.writeAsStringAsync(fileUri, backupJson, { encoding: FileSystem.EncodingType.UTF8 });
+      const path = `${FileSystem.documentDirectory}vaultflow_backup_${Date.now()}.json`;
+      await FileSystem.writeAsStringAsync(path, JSON.stringify(backup, null, 2));
 
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri);
+        await Sharing.shareAsync(path, { mimeType: 'application/json', dialogTitle: 'Save VaultFlow Backup' });
       } else {
-        Alert.alert('Success', `Backup saved to: ${fileUri}`);
+        Alert.alert('Saved', `Backup saved at:\n${path}`);
       }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      Alert.alert('Error', `Failed to create backup: ${msg}`);
-      console.error('createBackup error:', error);
+    } catch (e) {
+      Alert.alert('Error', 'Failed to create backup.');
     } finally {
       setLoading(false);
     }
@@ -343,490 +199,368 @@ export default function Settings() {
 
   const restoreBackup = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/json',
-      });
+      const result = await DocumentPicker.getDocumentAsync({ type: 'application/json' });
+      if (result.canceled || !result.assets[0]) return;
 
-      if (result.canceled) return;
-
-      Alert.alert(
-        'Restore Backup',
-        'This will replace all existing transactions. Are you sure?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Restore',
-            style: 'destructive',
-            onPress: async () => {
-              try {
-                setLoading(true);
-                const fileContent = await FileSystem.readAsStringAsync(
-                  result.assets[0].uri
-                );
-                const backup = JSON.parse(fileContent);
-
-                if (!backup.transactions || !Array.isArray(backup.transactions)) {
-                  Alert.alert('Error', 'Invalid backup file');
-                  return;
-                }
-
-                // Delete all existing transactions
-                const { error: deleteError } = await supabase
-                  .from('transactions')
-                  .delete()
-                  .neq('id', '00000000-0000-0000-0000-000000000000');
-
-                if (deleteError) throw deleteError;
-
-                // Insert backed up transactions
-                const { error: insertError } = await supabase
-                  .from('transactions')
-                  .insert(backup.transactions);
-
-                if (insertError) throw insertError;
-
-                Alert.alert('Success', 'Backup restored successfully');
-              } catch (error) {
-                Alert.alert('Error', 'Failed to restore backup');
-                console.error(error);
-              } finally {
-                setLoading(false);
+      Alert.alert('Restore Backup', 'This will merge transactions from the backup file. Duplicates will be skipped. Continue?', [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Restore',
+          onPress: async () => {
+            setLoading(true);
+            try {
+              const content = await FileSystem.readAsStringAsync(result.assets[0].uri);
+              const backup = JSON.parse(content);
+              if (!backup.transactions || !Array.isArray(backup.transactions)) {
+                Alert.alert('Error', 'Invalid backup file.');
+                return;
               }
-            },
+
+              const mergeResult = await mergeTransactions(backup.transactions);
+
+              if (backup.settings) {
+                await saveSettings({ ...DEFAULT_SETTINGS, ...backup.settings });
+              }
+              if (backup.currency?.currencyCode) {
+                await setCurrencyPreference(backup.currency);
+                setCurrency(backup.currency);
+              }
+
+              Alert.alert(
+                'Restore Complete',
+                `Imported: ${mergeResult.imported}\nSkipped duplicates: ${mergeResult.skipped}\nFailed: ${mergeResult.failed}`
+              );
+            } catch {
+              Alert.alert('Error', 'Failed to restore backup.');
+            } finally {
+              setLoading(false);
+            }
           },
-        ]
-      );
-    } catch (error) {
-      Alert.alert('Error', 'Failed to select backup file');
-      console.error(error);
+        },
+      ]);
+    } catch {
+      Alert.alert('Error', 'Could not open file picker.');
     }
   };
 
+  const resetAllData = () => {
+    Alert.alert(
+      '⚠️ Reset All Data',
+      'This will permanently delete ALL transactions, settings, and preferences. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset Everything',
+          style: 'destructive',
+          onPress: async () => {
+            setLoading(true);
+            try {
+              await clearAllTransactions();
+              await SecureStore.deleteItemAsync(PIN_KEY);
+              await SecureStore.deleteItemAsync(SETTINGS_KEY);
+              await SecureStore.deleteItemAsync(ONBOARDING_KEY);
+              await setCurrencyPreference(DEFAULT_CURRENCY);
+              setPinEnabled(false);
+              setSettings(DEFAULT_SETTINGS);
+              setCurrency(DEFAULT_CURRENCY);
+              DeviceEventEmitter.emit('vaultflow:data-reset');
+              Alert.alert('Done', 'All data has been reset.');
+              router.replace('/');
+            } catch {
+              Alert.alert('Error', 'Reset failed.');
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const filteredCurrencies = CURRENCY_OPTIONS.filter((opt) => {
+    const q = currencySearch.trim().toLowerCase();
+    if (!q) return true;
+    return `${opt.country} ${opt.currencyCode} ${opt.locale}`.toLowerCase().includes(q);
+  });
+
   return (
-    <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <SettingsIcon size={24} color="#ffffff" />
-        <Text style={styles.title}>Settings</Text>
-        <Text style={styles.subtitle}>Manage your preferences</Text>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 80 }}>
+      {/* Header */}
+      <LinearGradient
+        colors={[theme.colors.primaryDark, theme.colors.primary]}
+        style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 12 }]}>
+        <SettingsIcon size={24} color="rgba(255,255,255,0.8)" style={{ marginBottom: 4 }} />
+        <Text style={styles.headerTitle}>Settings</Text>
+        <Text style={styles.headerSub}>VaultFlow preferences</Text>
+      </LinearGradient>
+
+      <UpdateChecker />
+
+      {/* Currency Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Globe size={18} color={theme.colors.primary} />
+          <Text style={styles.sectionTitle}>Currency</Text>
+        </View>
+        <Text style={styles.currentCurrency}>
+          Current: {currency.country} · {currency.currencyCode} · {formatAmount(1234.56, currency)}
+        </Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Search country or currency…"
+          placeholderTextColor={theme.colors.textMuted}
+          value={currencySearch}
+          onChangeText={setCurrencySearch}
+        />
+        <View style={styles.currencyList}>
+          {filteredCurrencies.slice(0, currencySearch ? 999 : 6).map((opt) => (
+            <TouchableOpacity
+              key={`${opt.currencyCode}-${opt.locale}`}
+              style={[styles.currencyItem, opt.currencyCode === currency.currencyCode && styles.currencyItemActive]}
+              onPress={() => handleSaveCurrency(opt)}>
+              <View>
+                <Text style={styles.currencyCountry}>{opt.country}</Text>
+                <Text style={styles.currencyCode}>{opt.currencyCode} · {opt.currencySymbol}</Text>
+              </View>
+              {opt.currencyCode === currency.currencyCode && (
+                <Text style={styles.selectedBadge}>✓</Text>
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      {/* Notifications Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Bell size={18} color={theme.colors.primary} />
+          <Text style={styles.sectionTitle}>Notifications</Text>
+        </View>
+        <View style={styles.settingRow}>
+          <Text style={styles.settingLabel}>Monthly Summary Alerts</Text>
+          <Switch
+            value={settings.monthlySummaryAlerts}
+            onValueChange={(v) => toggleSetting('monthlySummaryAlerts', v)}
+            trackColor={{ true: theme.colors.primary }}
+          />
+        </View>
+        <View style={styles.settingRow}>
+          <Text style={styles.settingLabel}>Large Transaction Alerts</Text>
+          <Switch
+            value={settings.largeTransactionAlerts}
+            onValueChange={(v) => toggleSetting('largeTransactionAlerts', v)}
+            trackColor={{ true: theme.colors.primary }}
+          />
+        </View>
+        {settings.largeTransactionAlerts && (
+          <View style={styles.thresholdRow}>
+            <Text style={styles.thresholdLabel}>Threshold ({currency.currencyCode})</Text>
+            <TextInput
+              style={styles.thresholdInput}
+              keyboardType="numeric"
+              value={String(settings.largeTransactionThreshold)}
+              onChangeText={(v) => updateThreshold('largeTransactionThreshold', v)}
+            />
+          </View>
+        )}
+        <View style={styles.settingRow}>
+          <Text style={styles.settingLabel}>Low Balance Alerts</Text>
+          <Switch
+            value={settings.lowBalanceAlerts}
+            onValueChange={(v) => toggleSetting('lowBalanceAlerts', v)}
+            trackColor={{ true: theme.colors.primary }}
+          />
+        </View>
+        {settings.lowBalanceAlerts && (
+          <View style={styles.thresholdRow}>
+            <Text style={styles.thresholdLabel}>Threshold ({currency.currencyCode})</Text>
+            <TextInput
+              style={styles.thresholdInput}
+              keyboardType="numeric"
+              value={String(settings.lowBalanceThreshold)}
+              onChangeText={(v) => updateThreshold('lowBalanceThreshold', v)}
+            />
+          </View>
+        )}
       </View>
 
       {/* Security Section */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Security</Text>
-
-        <View style={styles.settingItem}>
-          <View style={styles.settingInfo}>
-            <Lock size={20} color="#3b82f6" />
-            <Text style={styles.settingLabel}>PIN Lock</Text>
-          </View>
-          <View style={styles.settingActions}>
-            <Text style={styles.settingValue}>
-              {pinEnabled ? 'Enabled' : 'Disabled'}
-            </Text>
-            <TouchableOpacity
-              style={styles.settingButton}
-              onPress={() => {
-                if (pinEnabled) {
-                  handleDisablePin();
-                } else {
-                  setPinModalVisible(true);
-                  setSettingPin(false);
-                }
-              }}>
-              <Text style={styles.settingButtonText}>
-                {pinEnabled ? 'Change' : 'Enable'}
-              </Text>
+        <View style={styles.sectionHeader}>
+          <Shield size={18} color={theme.colors.primary} />
+          <Text style={styles.sectionTitle}>Security</Text>
+        </View>
+        {!pinEnabled ? (
+          <>
+            <TouchableOpacity style={styles.actionBtn} onPress={() => setShowPinForm(!showPinForm)}>
+              <Lock size={16} color={theme.colors.primary} />
+              <Text style={styles.actionBtnText}>Set PIN Lock</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-
-        {biometricAvailable && (
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Shield size={20} color="#8b5cf6" />
-              <Text style={styles.settingLabel}>Biometric Lock</Text>
-            </View>
-            <Switch
-              value={settings.biometricEnabled}
-              onValueChange={(value) => {
-                if (value) {
-                  handleEnableBiometric();
-                } else {
-                  saveSettings({ ...settings, biometricEnabled: false });
-                }
-              }}
-            />
-          </View>
-        )}
-      </View>
-
-      {/* Alerts Section */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Alerts & Notifications</Text>
-
-        <View style={styles.settingItem}>
-          <View style={styles.settingInfo}>
-            <Bell size={20} color="#10b981" />
-            <Text style={styles.settingLabel}>Monthly Summary</Text>
-          </View>
-          <Switch
-            value={settings.monthlySummaryAlerts}
-            onValueChange={(value) =>
-              saveSettings({ ...settings, monthlySummaryAlerts: value })
-            }
-          />
-        </View>
-
-        <View style={styles.settingItem}>
-          <View style={styles.settingInfo}>
-            <Bell size={20} color="#f59e0b" />
-            <Text style={styles.settingLabel}>Large Transactions</Text>
-          </View>
-          <Switch
-            value={settings.largeTransactionAlerts}
-            onValueChange={(value) =>
-              saveSettings({ ...settings, largeTransactionAlerts: value })
-            }
-          />
-        </View>
-
-        {settings.largeTransactionAlerts && (
-          <View style={styles.settingItem}>
-            <Text style={styles.settingLabel}>Threshold (₹)</Text>
-            <TextInput
-              style={styles.input}
-              keyboardType="numeric"
-              value={settings.largeTransactionThreshold.toString()}
-              onChangeText={(text) =>
-                saveSettings({
-                  ...settings,
-                  largeTransactionThreshold: parseFloat(text) || 0,
-                })
-              }
-            />
-          </View>
-        )}
-
-        <View style={styles.settingItem}>
-          <View style={styles.settingInfo}>
-            <Bell size={20} color="#ef4444" />
-            <Text style={styles.settingLabel}>Low Balance Alerts</Text>
-          </View>
-          <Switch
-            value={settings.lowBalanceAlerts}
-            onValueChange={(value) =>
-              saveSettings({ ...settings, lowBalanceAlerts: value })
-            }
-          />
-        </View>
-
-        {settings.lowBalanceAlerts && (
-          <View style={styles.settingItem}>
-            <Text style={styles.settingLabel}>Threshold (₹)</Text>
-            <TextInput
-              style={styles.input}
-              keyboardType="numeric"
-              value={settings.lowBalanceThreshold.toString()}
-              onChangeText={(text) =>
-                saveSettings({
-                  ...settings,
-                  lowBalanceThreshold: parseFloat(text) || 0,
-                })
-              }
-            />
-          </View>
-        )}
-      </View>
-
-      {/* Updates Section */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>App Updates</Text>
-        <UpdateChecker />
-      </View>
-
-      {/* Export & Backup Section */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Export & Backup</Text>
-
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={exportToCSV}
-          disabled={loading}>
-          <Download size={20} color="#3b82f6" />
-          <Text style={styles.actionButtonText}>Export to CSV</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={exportToExcel}
-          disabled={loading}>
-          <Download size={20} color="#10b981" />
-          <Text style={styles.actionButtonText}>Export to Excel</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={createBackup}
-          disabled={loading}>
-          <Upload size={20} color="#8b5cf6" />
-          <Text style={styles.actionButtonText}>Create Backup</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.actionButton, styles.restoreButton]}
-          onPress={restoreBackup}
-          disabled={loading}>
-          <Download size={20} color="#ef4444" />
-          <Text style={[styles.actionButtonText, styles.restoreButtonText]}>
-            Restore Backup
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* PIN Modal */}
-      <Modal
-        visible={pinModalVisible}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => {
-          setPinModalVisible(false);
-          setPinInput('');
-          setConfirmPin('');
-          setSettingPin(false);
-        }}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>
-              {settingPin ? 'Confirm PIN' : pinEnabled ? 'Enter Current PIN' : 'Set PIN'}
-            </Text>
-            <TextInput
-              style={styles.pinInput}
-              placeholder={settingPin ? 'Confirm PIN' : 'Enter PIN'}
-              value={pinInput}
-              onChangeText={setPinInput}
-              keyboardType="numeric"
-              secureTextEntry={!showPin}
-              maxLength={6}
-            />
-            {settingPin && (
-              <TextInput
-                style={styles.pinInput}
-                placeholder="Confirm PIN"
-                value={confirmPin}
-                onChangeText={setConfirmPin}
-                keyboardType="numeric"
-                secureTextEntry={!showPin}
-                maxLength={6}
-              />
+            {showPinForm && (
+              <View style={styles.pinForm}>
+                <TextInput
+                  style={styles.input}
+                  placeholder="New PIN (min 4 digits)"
+                  placeholderTextColor={theme.colors.textMuted}
+                  keyboardType="numeric"
+                  secureTextEntry={!showPin}
+                  value={pinInput}
+                  onChangeText={setPinInput}
+                  maxLength={8}
+                />
+                <TextInput
+                  style={styles.input}
+                  placeholder="Confirm PIN"
+                  placeholderTextColor={theme.colors.textMuted}
+                  keyboardType="numeric"
+                  secureTextEntry={!showPin}
+                  value={confirmPin}
+                  onChangeText={setConfirmPin}
+                  maxLength={8}
+                />
+                <View style={styles.pinActions}>
+                  <TouchableOpacity
+                    style={styles.showPinBtn}
+                    onPress={() => setShowPin(!showPin)}>
+                    {showPin ? <EyeOff size={16} color={theme.colors.textSecondary} /> : <Eye size={16} color={theme.colors.textSecondary} />}
+                    <Text style={styles.showPinText}>{showPin ? 'Hide' : 'Show'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.saveBtn} onPress={handleSetPin}>
+                    <Text style={styles.saveBtnText}>Save PIN</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
             )}
-            <TouchableOpacity
-              style={styles.eyeButton}
-              onPress={() => setShowPin(!showPin)}>
-              {showPin ? (
-                <EyeOff size={20} color="#6b7280" />
-              ) : (
-                <Eye size={20} color="#6b7280" />
-              )}
-            </TouchableOpacity>
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.modalButtonCancel]}
-                onPress={() => {
-                  setPinModalVisible(false);
-                  setPinInput('');
-                  setConfirmPin('');
-                  setSettingPin(false);
-                }}>
-                <Text style={styles.modalButtonTextCancel}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.modalButtonConfirm]}
-                onPress={handleSetPin}>
-                <Text style={styles.modalButtonTextConfirm}>Confirm</Text>
-              </TouchableOpacity>
+          </>
+        ) : (
+          <View style={styles.settingRow}>
+            <View>
+              <Text style={styles.settingLabel}>PIN Lock Active</Text>
+              <Text style={styles.settingMeta}>App is locked with PIN</Text>
             </View>
+            <TouchableOpacity onPress={handleDisablePin} style={styles.dangerBtn}>
+              <Text style={styles.dangerBtnText}>Remove</Text>
+            </TouchableOpacity>
           </View>
+        )}
+        {biometricAvailable && pinEnabled && (
+          <View style={styles.settingRow}>
+            <Text style={styles.settingLabel}>Biometric Unlock</Text>
+            <Switch
+              value={biometricEnabled}
+              onValueChange={toggleBiometric}
+              trackColor={{ true: theme.colors.primary }}
+            />
+          </View>
+        )}
+      </View>
+
+      {/* Backup Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Download size={18} color={theme.colors.primary} />
+          <Text style={styles.sectionTitle}>Backup & Restore</Text>
         </View>
-      </Modal>
+        <TouchableOpacity style={styles.actionBtn} onPress={createBackup} disabled={loading}>
+          <Download size={16} color={theme.colors.primary} />
+          <Text style={styles.actionBtnText}>Create Backup (JSON)</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.actionBtn} onPress={restoreBackup} disabled={loading}>
+          <Upload size={16} color={theme.colors.primary} />
+          <Text style={styles.actionBtnText}>Restore from Backup</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.actionBtn, styles.dangerAction]} onPress={resetAllData} disabled={loading}>
+          <Trash2 size={16} color={theme.colors.expense} />
+          <Text style={[styles.actionBtnText, { color: theme.colors.expense }]}>Reset All Data</Text>
+        </TouchableOpacity>
+      </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
+  container: { flex: 1, backgroundColor: theme.colors.background },
   header: {
-    backgroundColor: '#3b82f6',
-    padding: 24,
-    paddingTop: 60,
-    paddingBottom: 32,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.xl,
+    borderBottomLeftRadius: theme.radius.xl,
+    borderBottomRightRadius: theme.radius.xl,
     alignItems: 'center',
   },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#ffffff',
-    marginTop: 12,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#dbeafe',
-    marginTop: 4,
-  },
+  headerTitle: { ...theme.typography.title, color: '#fff' },
+  headerSub: { ...theme.typography.subtitle, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
   section: {
-    backgroundColor: '#ffffff',
-    margin: 16,
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
+    margin: theme.spacing.md,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    ...theme.shadow.sm,
+    gap: theme.spacing.sm,
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#111827',
-    marginBottom: 16,
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  sectionTitle: { ...theme.typography.heading, color: theme.colors.text },
+  currentCurrency: { ...theme.typography.label, color: theme.colors.textSecondary, marginBottom: 4 },
+  input: {
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 10,
+    ...theme.typography.body,
+    color: theme.colors.text,
   },
-  settingItem: {
+  currencyList: { gap: 4 },
+  currencyItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
-  },
-  settingInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  settingLabel: {
-    fontSize: 16,
-    color: '#374151',
-    fontWeight: '500',
-  },
-  settingActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  settingValue: {
-    fontSize: 14,
-    color: '#6b7280',
-  },
-  settingButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    backgroundColor: '#3b82f6',
-    borderRadius: 6,
-  },
-  settingButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  input: {
-    backgroundColor: '#f9fafb',
+    padding: theme.spacing.sm,
+    borderRadius: theme.radius.sm,
     borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-    color: '#111827',
-    marginTop: 8,
+    borderColor: theme.colors.border,
   },
-  actionButton: {
+  currencyItemActive: { borderColor: theme.colors.primary, backgroundColor: '#EEF2FF' },
+  currencyCountry: { ...theme.typography.label, color: theme.colors.text },
+  currencyCode: { ...theme.typography.caption, color: theme.colors.textMuted },
+  selectedBadge: { color: theme.colors.primary, fontWeight: '700', fontSize: 16 },
+  settingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  settingLabel: { ...theme.typography.label, color: theme.colors.text },
+  settingMeta: { ...theme.typography.caption, color: theme.colors.textMuted },
+  thresholdRow: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing.md },
+  thresholdLabel: { ...theme.typography.label, color: theme.colors.textSecondary, flex: 1 },
+  thresholdInput: {
+    width: 100,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    ...theme.typography.body,
+    color: theme.colors.text,
+    textAlign: 'right',
+  },
+  actionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#f9fafb',
-    padding: 16,
-    borderRadius: 8,
-    marginBottom: 12,
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
+    gap: 10,
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
   },
-  restoreButton: {
-    borderColor: '#ef4444',
-    backgroundColor: '#fef2f2',
-  },
-  actionButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#374151',
-  },
-  restoreButtonText: {
-    color: '#ef4444',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 24,
-    width: '80%',
-    maxWidth: 400,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 24,
-    textAlign: 'center',
-  },
-  pinInput: {
-    backgroundColor: '#f9fafb',
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
-    borderRadius: 8,
-    padding: 16,
-    fontSize: 18,
-    textAlign: 'center',
-    marginBottom: 12,
-    letterSpacing: 8,
-  },
-  eyeButton: {
-    alignSelf: 'center',
-    padding: 8,
-    marginBottom: 16,
-  },
-  modalButtons: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  modalButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  modalButtonCancel: {
-    backgroundColor: '#f9fafb',
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
-  },
-  modalButtonConfirm: {
-    backgroundColor: '#3b82f6',
-  },
-  modalButtonTextCancel: {
-    color: '#374151',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  modalButtonTextConfirm: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  actionBtnText: { ...theme.typography.label, color: theme.colors.primary },
+  dangerAction: { borderColor: theme.colors.expenseLight },
+  pinForm: { gap: theme.spacing.sm },
+  pinActions: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  showPinBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  showPinText: { ...theme.typography.label, color: theme.colors.textSecondary },
+  saveBtn: { backgroundColor: theme.colors.primary, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing.md, paddingVertical: 8 },
+  saveBtnText: { ...theme.typography.label, color: '#fff' },
+  dangerBtn: { backgroundColor: theme.colors.expenseLight, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing.md, paddingVertical: 8 },
+  dangerBtnText: { ...theme.typography.label, color: theme.colors.expense },
 });
-

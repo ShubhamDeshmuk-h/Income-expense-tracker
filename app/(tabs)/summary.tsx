@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -6,88 +6,55 @@ import {
   ScrollView,
   RefreshControl,
   TouchableOpacity,
-  Modal,
-  FlatList,
 } from 'react-native';
-import { supabase, Transaction, Balance } from '@/lib/supabase';
-import { BarChart, PieChart, LineChart } from 'react-native-chart-kit';
-import { Dimensions } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from 'expo-router';
+import { BarChart3, TrendingUp, TrendingDown, PieChart } from 'lucide-react-native';
 import {
-  Filter,
-  TrendingUp,
-  TrendingDown,
-  Wallet,
-  CreditCard,
-  DollarSign,
-} from 'lucide-react-native';
+  getBalanceSummary,
+  getMonthlySummary,
+  getCategoryBreakdown,
+  type BalanceSummary,
+} from '@/lib/db';
+import { useCurrencyPreference } from '@/hooks/useCurrencyPreference';
+import { formatAmount } from '@/lib/currency';
+import { theme } from '@/lib/theme';
 
-const screenWidth = Dimensions.get('window').width;
-const chartConfig = {
-  backgroundColor: '#ffffff',
-  backgroundGradientFrom: '#ffffff',
-  backgroundGradientTo: '#ffffff',
-  decimalPlaces: 0,
-  color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
-  labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-  style: {
-    borderRadius: 16,
-  },
-  propsForDots: {
-    r: '6',
-    strokeWidth: '2',
-    stroke: '#3b82f6',
-  },
-};
-
-const CATEGORIES = [
-  'Salary',
-  'Business',
-  'Investment',
-  'Food',
-  'Shopping',
-  'Bills',
-  'Transport',
-  'Entertainment',
-  'Healthcare',
-  'Education',
-  'Other',
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ];
 
 export default function Summary() {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [balances, setBalances] = useState<Balance[]>([]);
+  const insets = useSafeAreaInsets();
+  const currency = useCurrencyPreference();
+  const [balances, setBalances] = useState<BalanceSummary[]>([]);
+  const [monthlyIncome, setMonthlyIncome] = useState(0);
+  const [monthlyExpense, setMonthlyExpense] = useState(0);
+  const [categoryBreakdown, setCategoryBreakdown] = useState<{ category: string; total: number; count: number }[]>([]);
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  const [selectedYear] = useState(new Date().getFullYear());
+  const [activeTab, setActiveTab] = useState<'income' | 'expense'>('expense');
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [filterModalVisible, setFilterModalVisible] = useState(false);
 
   const fetchData = async () => {
-    try {
-      setError(null);
-      
-      // Fetch transactions
-      const { data: transactionsData, error: transactionsError } = await supabase
-        .from('transactions')
-        .select('*')
-        .order('date', { ascending: false });
-
-      if (transactionsError) throw transactionsError;
-
-      // Fetch balances
-      const { data: balancesData, error: balancesError } = await supabase
-        .from('balances')
-        .select('*')
-        .order('mode');
-
-      if (balancesError) throw balancesError;
-
-      if (transactionsData) setTransactions(transactionsData);
-      if (balancesData) setBalances(balancesData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch data');
-    }
+    const [bal, monthly, cats] = await Promise.all([
+      getBalanceSummary(),
+      getMonthlySummary(selectedYear, selectedMonth + 1),
+      getCategoryBreakdown(activeTab),
+    ]);
+    setBalances(bal);
+    setMonthlyIncome(monthly.total_income);
+    setMonthlyExpense(monthly.total_expense);
+    setCategoryBreakdown(cats);
   };
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchData();
+    }, [selectedMonth, activeTab])
+  );
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -95,534 +62,210 @@ export default function Summary() {
     setRefreshing(false);
   };
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  // Filter transactions by month and category
-  const filteredTransactions = transactions.filter((t) => {
-    const transactionMonth = t.date.slice(0, 7);
-    const monthMatch = transactionMonth === selectedMonth;
-    const categoryMatch = selectedCategory === 'all' || t.category === selectedCategory;
-    return monthMatch && categoryMatch;
-  });
-
-  // Calculate monthly income and expense
-  const monthlyIncome = filteredTransactions
-    .filter((t) => t.type === 'income')
-    .reduce((sum, t) => sum + Number(t.amount), 0);
-
-  const monthlyExpense = filteredTransactions
-    .filter((t) => t.type === 'expense')
-    .reduce((sum, t) => sum + Number(t.amount), 0);
-
-  // Prepare data for bar chart (income vs expense)
-  const barChartData = {
-    labels: ['Income', 'Expense'],
-    datasets: [
-      {
-        data: [monthlyIncome, monthlyExpense],
-      },
-    ],
-  };
-
-  // Prepare data for expense distribution pie chart
-  const expenseTransactions = filteredTransactions.filter((t) => t.type === 'expense');
-  const categoryTotals: { [key: string]: number } = {};
-  expenseTransactions.forEach((t) => {
-    categoryTotals[t.category] = (categoryTotals[t.category] || 0) + Number(t.amount);
-  });
-
-  const pieChartData = Object.entries(categoryTotals).map(([category, amount], index) => ({
-    name: category,
-    population: amount,
-    color: `hsl(${(index * 360) / Math.max(Object.keys(categoryTotals).length, 1)}, 70%, 50%)`,
-    legendFontColor: '#7F7F7F',
-    legendFontSize: 12,
-  }));
-
-  // Prepare data for line chart (monthly trends)
-  const months = Array.from({ length: 6 }, (_, i) => {
-    const date = new Date();
-    date.setMonth(date.getMonth() - (5 - i));
-    return date.toISOString().slice(0, 7);
-  });
-
-  const monthlyTrends = months.map((month) => {
-    const monthTransactions = transactions.filter((t) => t.date.slice(0, 7) === month);
-    const income = monthTransactions
-      .filter((t) => t.type === 'income')
-      .reduce((sum, t) => sum + Number(t.amount), 0);
-    const expense = monthTransactions
-      .filter((t) => t.type === 'expense')
-      .reduce((sum, t) => sum + Number(t.amount), 0);
-    return { month, income, expense };
-  });
-
-  const lineChartData = {
-    labels: monthlyTrends.map((t) => {
-      const date = new Date(t.month + '-01');
-      return date.toLocaleDateString('en-US', { month: 'short' });
-    }),
-    datasets: [
-      {
-        data: monthlyTrends.map((t) => t.income),
-        color: (opacity = 1) => `rgba(16, 185, 129, ${opacity})`,
-        strokeWidth: 2,
-      },
-      {
-        data: monthlyTrends.map((t) => t.expense),
-        color: (opacity = 1) => `rgba(239, 68, 68, ${opacity})`,
-        strokeWidth: 2,
-      },
-    ],
-    legend: ['Income', 'Expense'],
-  };
-
-  const cashBalance = balances.find((b) => b.mode === 'cash');
-  const bankBalance = balances.find((b) => b.mode === 'bank');
-  const totalBalance = (cashBalance ? Number(cashBalance.current_balance) : 0) +
-    (bankBalance ? Number(bankBalance.current_balance) : 0);
-
-  // Generate months for filter
-  const availableMonths = Array.from(
-    new Set(transactions.map((t) => t.date.slice(0, 7)))
-  ).sort().reverse();
+  const totalBalance = balances.reduce((s, b) => s + Number(b.current_balance), 0);
+  const maxCategoryTotal = Math.max(...categoryBreakdown.map((c) => c.total), 1);
 
   return (
     <ScrollView
       style={styles.container}
+      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 80 }}
       refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.colors.primary} />
       }>
-      <View style={styles.header}>
-        <Text style={styles.title}>Monthly Summary</Text>
-        <Text style={styles.subtitle}>Analytics & Insights</Text>
-        <TouchableOpacity
-          style={styles.filterButton}
-          onPress={() => setFilterModalVisible(true)}>
-          <Filter size={20} color="#ffffff" />
-          <Text style={styles.filterButtonText}>Filter</Text>
-        </TouchableOpacity>
-      </View>
+      {/* Header */}
+      <LinearGradient
+        colors={[theme.colors.primaryDark, theme.colors.primary]}
+        style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 12 }]}>
+        <Text style={styles.title}>Financial Summary</Text>
+        <Text style={styles.subtitle}>Total Balance: {formatAmount(totalBalance, currency)}</Text>
+      </LinearGradient>
 
-      {error && (
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
-      )}
+      {/* Month Picker */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.monthRow}
+        contentContainerStyle={{ paddingHorizontal: theme.spacing.md, gap: 8 }}>
+        {MONTHS.map((m, i) => (
+          <TouchableOpacity
+            key={m}
+            style={[styles.monthChip, selectedMonth === i && styles.monthChipActive]}
+            onPress={() => setSelectedMonth(i)}>
+            <Text style={[styles.monthText, selectedMonth === i && styles.monthTextActive]}>{m}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
 
-      {/* Balance Summary */}
-      <View style={styles.balanceSection}>
-        <View style={styles.balanceCard}>
-          <View style={styles.balanceRow}>
-            <Wallet size={20} color="#3b82f6" />
-            <Text style={styles.balanceLabel}>Cash</Text>
+      {/* Monthly Stats */}
+      <View style={styles.statsRow}>
+        <View style={[styles.statCard, theme.shadow.sm]}>
+          <View style={[styles.statIcon, { backgroundColor: theme.colors.incomeLight }]}>
+            <TrendingUp size={18} color={theme.colors.income} />
           </View>
-          <Text style={styles.balanceAmount}>
-            ₹{cashBalance ? Number(cashBalance.current_balance).toFixed(2) : '0.00'}
+          <Text style={styles.statLabel}>Income</Text>
+          <Text style={[styles.statValue, { color: theme.colors.income }]}>
+            {formatAmount(monthlyIncome, currency)}
           </Text>
         </View>
-        <View style={styles.balanceCard}>
-          <View style={styles.balanceRow}>
-            <CreditCard size={20} color="#8b5cf6" />
-            <Text style={styles.balanceLabel}>Bank</Text>
+        <View style={[styles.statCard, theme.shadow.sm]}>
+          <View style={[styles.statIcon, { backgroundColor: theme.colors.expenseLight }]}>
+            <TrendingDown size={18} color={theme.colors.expense} />
           </View>
-          <Text style={styles.balanceAmount}>
-            ₹{bankBalance ? Number(bankBalance.current_balance).toFixed(2) : '0.00'}
+          <Text style={styles.statLabel}>Expenses</Text>
+          <Text style={[styles.statValue, { color: theme.colors.expense }]}>
+            {formatAmount(monthlyExpense, currency)}
           </Text>
         </View>
-        <View style={[styles.balanceCard, styles.totalBalanceCard]}>
-          <View style={styles.balanceRow}>
-            <DollarSign size={20} color="#10b981" />
-            <Text style={styles.balanceLabel}>Total</Text>
+        <View style={[styles.statCard, theme.shadow.sm]}>
+          <View style={[styles.statIcon, { backgroundColor: theme.colors.infoLight }]}>
+            <BarChart3 size={18} color={theme.colors.info} />
           </View>
-          <Text style={[styles.balanceAmount, styles.totalBalanceAmount]}>
-            ₹{totalBalance.toFixed(2)}
+          <Text style={styles.statLabel}>Net</Text>
+          <Text style={[
+            styles.statValue,
+            { color: monthlyIncome - monthlyExpense >= 0 ? theme.colors.income : theme.colors.expense }
+          ]}>
+            {formatAmount(monthlyIncome - monthlyExpense, currency)}
           </Text>
-        </View>
-      </View>
-
-      {/* Income vs Expense Bar Chart */}
-      <View style={styles.chartSection}>
-        <Text style={styles.sectionTitle}>Income vs Expense</Text>
-        <View style={styles.chartContainer}>
-          <BarChart
-            data={barChartData}
-            width={Math.max(screenWidth - 32, 300)}
-            height={220}
-            yAxisLabel="₹"
-            yAxisSuffix=""
-            chartConfig={chartConfig}
-            style={styles.chart}
-            showValuesOnTopOfBars
-            fromZero
-          />
-        </View>
-        <View style={styles.summaryStats}>
-          <View style={styles.statItem}>
-            <TrendingUp size={16} color="#10b981" />
-            <Text style={styles.statLabel}>Income</Text>
-            <Text style={[styles.statValue, styles.incomeText]}>
-              ₹{monthlyIncome.toFixed(2)}
-            </Text>
-          </View>
-          <View style={styles.statItem}>
-            <TrendingDown size={16} color="#ef4444" />
-            <Text style={styles.statLabel}>Expense</Text>
-            <Text style={[styles.statValue, styles.expenseText]}>
-              ₹{monthlyExpense.toFixed(2)}
-            </Text>
-          </View>
         </View>
       </View>
 
-      {/* Expense Distribution Pie Chart */}
-      {pieChartData.length > 0 && (
-        <View style={styles.chartSection}>
-          <Text style={styles.sectionTitle}>Expense Distribution</Text>
-          <View style={styles.chartContainer}>
-            <PieChart
-              data={pieChartData}
-              width={screenWidth - 32}
-              height={220}
-              chartConfig={chartConfig}
-              accessor="population"
-              backgroundColor="transparent"
-              paddingLeft="15"
-              style={styles.chart}
-            />
-          </View>
+      {/* Category Breakdown */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <PieChart size={18} color={theme.colors.primary} />
+          <Text style={styles.sectionTitle}>Category Breakdown</Text>
         </View>
-      )}
-
-      {/* Monthly Trends Line Chart */}
-      {monthlyTrends.some((t) => t.income > 0 || t.expense > 0) && (
-        <View style={styles.chartSection}>
-          <Text style={styles.sectionTitle}>6-Month Trends</Text>
-          <View style={styles.chartContainer}>
-            <LineChart
-              data={lineChartData}
-              width={Math.max(screenWidth - 32, 300)}
-              height={220}
-              chartConfig={chartConfig}
-              bezier
-              style={styles.chart}
-              fromZero
-            />
-          </View>
-        </View>
-      )}
-
-      {/* Filter Modal */}
-      <Modal
-        visible={filterModalVisible}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setFilterModalVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Filter Options</Text>
-            
-            <View style={styles.filterSection}>
-              <Text style={styles.filterLabel}>Month</Text>
-              <FlatList
-                data={availableMonths}
-                keyExtractor={(item) => item}
-                renderItem={({ item }) => {
-                  const date = new Date(item + '-01');
-                  const monthName = date.toLocaleDateString('en-US', { 
-                    month: 'long', 
-                    year: 'numeric' 
-                  });
-                  return (
-                    <TouchableOpacity
-                      style={[
-                        styles.filterOption,
-                        selectedMonth === item && styles.filterOptionActive,
-                      ]}
-                      onPress={() => setSelectedMonth(item)}>
-                      <Text
-                        style={[
-                          styles.filterOptionText,
-                          selectedMonth === item && styles.filterOptionTextActive,
-                        ]}>
-                        {monthName}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                }}
-              />
-            </View>
-
-            <View style={styles.filterSection}>
-              <Text style={styles.filterLabel}>Category</Text>
-              <View style={styles.categoryFilterGrid}>
-                <TouchableOpacity
-                  style={[
-                    styles.categoryFilterButton,
-                    selectedCategory === 'all' && styles.categoryFilterButtonActive,
-                  ]}
-                  onPress={() => setSelectedCategory('all')}>
-                  <Text
-                    style={[
-                      styles.categoryFilterButtonText,
-                      selectedCategory === 'all' && styles.categoryFilterButtonTextActive,
-                    ]}>
-                    All
-                  </Text>
-                </TouchableOpacity>
-                {CATEGORIES.map((cat) => (
-                  <TouchableOpacity
-                    key={cat}
-                    style={[
-                      styles.categoryFilterButton,
-                      selectedCategory === cat && styles.categoryFilterButtonActive,
-                    ]}
-                    onPress={() => setSelectedCategory(cat)}>
-                    <Text
-                      style={[
-                        styles.categoryFilterButtonText,
-                        selectedCategory === cat && styles.categoryFilterButtonTextActive,
-                      ]}>
-                      {cat}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-
+        <View style={styles.tabRow}>
+          {(['expense', 'income'] as const).map((t) => (
             <TouchableOpacity
-              style={styles.modalCloseButton}
-              onPress={() => setFilterModalVisible(false)}>
-              <Text style={styles.modalCloseButtonText}>Close</Text>
+              key={t}
+              style={[styles.tabBtn, activeTab === t && styles.tabBtnActive]}
+              onPress={() => setActiveTab(t)}>
+              <Text style={[styles.tabBtnText, activeTab === t && styles.tabBtnTextActive]}>
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </Text>
             </TouchableOpacity>
-          </View>
+          ))}
         </View>
-      </Modal>
+
+        {categoryBreakdown.length === 0 ? (
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyText}>No data for this period</Text>
+          </View>
+        ) : (
+          categoryBreakdown.map((item) => (
+            <View key={item.category} style={styles.catRow}>
+              <Text style={styles.catName}>{item.category}</Text>
+              <View style={styles.barTrack}>
+                <View
+                  style={[
+                    styles.barFill,
+                    {
+                      width: `${Math.round((item.total / maxCategoryTotal) * 100)}%`,
+                      backgroundColor: activeTab === 'income' ? theme.colors.income : theme.colors.expense,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.catAmount}>{formatAmount(item.total, currency)}</Text>
+            </View>
+          ))
+        )}
+      </View>
+
+      {/* Balance by Mode */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Balance by Mode</Text>
+        {balances.map((b) => (
+          <View key={b.mode} style={[styles.modeCard, theme.shadow.sm]}>
+            <Text style={styles.modeName}>{b.mode.charAt(0).toUpperCase() + b.mode.slice(1)}</Text>
+            <View style={styles.modeDetails}>
+              <Text style={[styles.modeDetail, { color: theme.colors.income }]}>
+                ↑ {formatAmount(Number(b.total_income), currency)}
+              </Text>
+              <Text style={[styles.modeDetail, { color: theme.colors.expense }]}>
+                ↓ {formatAmount(Number(b.total_expense), currency)}
+              </Text>
+              <Text style={[
+                styles.modeBalance,
+                { color: Number(b.current_balance) >= 0 ? theme.colors.income : theme.colors.expense }
+              ]}>
+                {formatAmount(Number(b.current_balance), currency)}
+              </Text>
+            </View>
+          </View>
+        ))}
+      </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
+  container: { flex: 1, backgroundColor: theme.colors.background },
   header: {
-    backgroundColor: '#3b82f6',
-    padding: 24,
-    paddingTop: 60,
-    paddingBottom: 32,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.xl,
+    borderBottomLeftRadius: theme.radius.xl,
+    borderBottomRightRadius: theme.radius.xl,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#ffffff',
-    marginBottom: 4,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#dbeafe',
-    marginBottom: 16,
-  },
-  filterButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  title: { ...theme.typography.title, color: '#fff' },
+  subtitle: { ...theme.typography.subtitle, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
+  monthRow: { maxHeight: 48, marginVertical: theme.spacing.md },
+  monthChip: {
+    paddingHorizontal: 14,
     paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    alignSelf: 'flex-start',
-    gap: 8,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
   },
-  filterButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  errorContainer: {
-    margin: 16,
-    padding: 12,
-    backgroundColor: '#fef2f2',
-    borderRadius: 8,
-    borderLeftWidth: 4,
-    borderLeftColor: '#ef4444',
-  },
-  errorText: {
-    color: '#991b1b',
-    fontSize: 14,
-  },
-  balanceSection: {
+  monthChipActive: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
+  monthText: { ...theme.typography.label, color: theme.colors.textSecondary },
+  monthTextActive: { color: '#fff' },
+  statsRow: {
     flexDirection: 'row',
-    padding: 16,
-    gap: 12,
+    marginHorizontal: theme.spacing.md,
+    gap: theme.spacing.sm,
+    marginBottom: theme.spacing.md,
   },
-  balanceCard: {
+  statCard: {
     flex: 1,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    alignItems: 'center',
+    gap: 6,
   },
-  totalBalanceCard: {
-    backgroundColor: '#f0fdf4',
-    borderWidth: 2,
-    borderColor: '#10b981',
-  },
-  balanceRow: {
+  statIcon: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  statLabel: { ...theme.typography.caption, color: theme.colors.textMuted },
+  statValue: { ...theme.typography.label, fontWeight: '700', textAlign: 'center' },
+  section: { margin: theme.spacing.md, marginTop: 0 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: theme.spacing.sm },
+  sectionTitle: { ...theme.typography.heading, color: theme.colors.text },
+  tabRow: { flexDirection: 'row', backgroundColor: theme.colors.surfaceElevated, borderRadius: theme.radius.md, padding: 4, gap: 4, marginBottom: theme.spacing.md },
+  tabBtn: { flex: 1, paddingVertical: 8, borderRadius: theme.radius.sm, alignItems: 'center' },
+  tabBtnActive: { backgroundColor: theme.colors.primary },
+  tabBtnText: { ...theme.typography.label, color: theme.colors.textSecondary },
+  tabBtnTextActive: { color: '#fff' },
+  emptyBox: { padding: theme.spacing.xl, alignItems: 'center' },
+  emptyText: { ...theme.typography.body, color: theme.colors.textMuted },
+  catRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10, gap: 8 },
+  catName: { ...theme.typography.label, color: theme.colors.text, width: 80 },
+  barTrack: { flex: 1, height: 8, backgroundColor: theme.colors.surfaceElevated, borderRadius: 4, overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: 4 },
+  catAmount: { ...theme.typography.caption, color: theme.colors.textSecondary, width: 80, textAlign: 'right' },
+  modeCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
   },
-  balanceLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    fontWeight: '600',
-  },
-  balanceAmount: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  totalBalanceAmount: {
-    color: '#10b981',
-    fontSize: 20,
-  },
-  chartSection: {
-    margin: 16,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#111827',
-    marginBottom: 16,
-  },
-  chartContainer: {
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  chart: {
-    borderRadius: 16,
-  },
-  summaryStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
-  },
-  statItem: {
-    alignItems: 'center',
-    gap: 4,
-  },
-  statLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-  },
-  statValue: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  incomeText: {
-    color: '#10b981',
-  },
-  expenseText: {
-    color: '#ef4444',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 24,
-    maxHeight: '80%',
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 24,
-  },
-  filterSection: {
-    marginBottom: 24,
-  },
-  filterLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#374151',
-    marginBottom: 12,
-  },
-  filterOption: {
-    padding: 12,
-    backgroundColor: '#f9fafb',
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  filterOptionActive: {
-    backgroundColor: '#3b82f6',
-  },
-  filterOptionText: {
-    fontSize: 14,
-    color: '#374151',
-  },
-  filterOptionTextActive: {
-    color: '#ffffff',
-    fontWeight: '600',
-  },
-  categoryFilterGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  categoryFilterButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    backgroundColor: '#f9fafb',
-    borderRadius: 20,
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
-  },
-  categoryFilterButtonActive: {
-    backgroundColor: '#3b82f6',
-    borderColor: '#3b82f6',
-  },
-  categoryFilterButtonText: {
-    fontSize: 12,
-    color: '#6b7280',
-    fontWeight: '600',
-  },
-  categoryFilterButtonTextActive: {
-    color: '#ffffff',
-  },
-  modalCloseButton: {
-    backgroundColor: '#3b82f6',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  modalCloseButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  modeName: { ...theme.typography.label, color: theme.colors.text },
+  modeDetails: { flexDirection: 'row', gap: theme.spacing.md, alignItems: 'center' },
+  modeDetail: { ...theme.typography.caption },
+  modeBalance: { ...theme.typography.label, fontWeight: '700' },
 });
-

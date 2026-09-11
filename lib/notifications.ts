@@ -1,6 +1,8 @@
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
-import { supabase, Transaction, Balance } from './supabase';
+import { getBalanceSummary } from './db';
+import { formatAmount } from './currency';
+import { getCurrencyPreference } from './preferences';
 
 const SETTINGS_KEY = 'user_settings';
 
@@ -35,21 +37,15 @@ export async function requestNotificationPermissions() {
 
     return finalStatus === 'granted';
   } catch (error) {
-    // In Expo Go, notifications may not be fully supported
-    // Return false but don't throw error
-    console.warn('Notification permissions not available in Expo Go:', error);
+    console.warn('Notification permissions not available:', error);
     return false;
   }
 }
 
 export async function scheduleMonthlySummaryNotification() {
   try {
-    // Check if notifications are available (not in Expo Go)
     const hasPermission = await requestNotificationPermissions();
-    if (!hasPermission) {
-      console.warn('Notifications not available - requires development build');
-      return;
-    }
+    if (!hasPermission) return;
 
     const settingsJson = await SecureStore.getItemAsync(SETTINGS_KEY);
     if (!settingsJson) return;
@@ -57,35 +53,30 @@ export async function scheduleMonthlySummaryNotification() {
     const settings: UserSettings = JSON.parse(settingsJson);
     if (!settings.monthlySummaryAlerts) return;
 
-    // Cancel existing monthly notifications
     await Notifications.cancelAllScheduledNotificationsAsync();
-
-    // Schedule for the 1st of each month at 9 AM
-    const trigger = {
-      day: 1,
-      hour: 9,
-      minute: 0,
-      repeats: true,
-    };
 
     await Notifications.scheduleNotificationAsync({
       content: {
         title: 'Monthly Finance Summary',
-        body: 'Check your monthly income and expense summary!',
+        body: 'Check your monthly income and expense summary in VaultFlow!',
         sound: true,
       },
-      trigger,
+      trigger: {
+        day: 1,
+        hour: 9,
+        minute: 0,
+        repeats: true,
+      } as any,
     });
   } catch (error) {
-    // Silently fail in Expo Go - notifications require development build
-    console.warn('Error scheduling monthly notification (may require development build):', error);
+    console.warn('Error scheduling monthly notification:', error);
   }
 }
 
 export async function checkLargeTransaction(amount: number) {
   try {
     const hasPermission = await requestNotificationPermissions();
-    if (!hasPermission) return; // Silently fail in Expo Go
+    if (!hasPermission) return;
 
     const settingsJson = await SecureStore.getItemAsync(SETTINGS_KEY);
     if (!settingsJson) return;
@@ -94,17 +85,17 @@ export async function checkLargeTransaction(amount: number) {
     if (!settings.largeTransactionAlerts) return;
 
     if (amount >= settings.largeTransactionThreshold) {
+      const currency = await getCurrencyPreference();
       await Notifications.scheduleNotificationAsync({
         content: {
           title: 'Large Transaction Alert',
-          body: `A large transaction of ₹${amount.toFixed(2)} was recorded.`,
+          body: `A large transaction of ${formatAmount(amount, currency)} was recorded in VaultFlow.`,
           sound: true,
         },
-        trigger: null, // Show immediately
+        trigger: null,
       });
     }
   } catch (error) {
-    // Silently fail - notifications require development build
     console.warn('Error checking large transaction:', error);
   }
 }
@@ -112,7 +103,7 @@ export async function checkLargeTransaction(amount: number) {
 export async function checkLowBalance() {
   try {
     const hasPermission = await requestNotificationPermissions();
-    if (!hasPermission) return; // Silently fail in Expo Go
+    if (!hasPermission) return;
 
     const settingsJson = await SecureStore.getItemAsync(SETTINGS_KEY);
     if (!settingsJson) return;
@@ -120,33 +111,24 @@ export async function checkLowBalance() {
     const settings: UserSettings = JSON.parse(settingsJson);
     if (!settings.lowBalanceAlerts) return;
 
-    const { data: balances, error } = await supabase
-      .from('balances')
-      .select('*');
+    const balances = await getBalanceSummary();
+    const total = balances.reduce(
+      (sum, b) => sum + Number(b.current_balance),
+      0
+    );
 
-    if (error) throw error;
-
-    if (balances) {
-      const cashBalance = balances.find((b) => b.mode === 'cash');
-      const bankBalance = balances.find((b) => b.mode === 'bank');
-
-      const cash = cashBalance ? Number(cashBalance.current_balance) : 0;
-      const bank = bankBalance ? Number(bankBalance.current_balance) : 0;
-      const total = cash + bank;
-
-      if (total < settings.lowBalanceThreshold) {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Low Balance Alert',
-            body: `Your total balance (₹${total.toFixed(2)}) is below the threshold (₹${settings.lowBalanceThreshold.toFixed(2)}).`,
-            sound: true,
-          },
-          trigger: null, // Show immediately
-        });
-      }
+    if (total < settings.lowBalanceThreshold) {
+      const currency = await getCurrencyPreference();
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Low Balance Alert',
+          body: `Your total balance (${formatAmount(total, currency)}) is below the threshold (${formatAmount(settings.lowBalanceThreshold, currency)}).`,
+          sound: true,
+        },
+        trigger: null,
+      });
     }
   } catch (error) {
-    // Silently fail - notifications require development build
     console.warn('Error checking low balance:', error);
   }
 }
@@ -158,19 +140,18 @@ export async function sendTransactionNotification(
 ) {
   try {
     const hasPermission = await requestNotificationPermissions();
-    if (!hasPermission) return; // Silently fail in Expo Go
+    if (!hasPermission) return;
 
+    const currency = await getCurrencyPreference();
     await Notifications.scheduleNotificationAsync({
       content: {
-        title: type === 'income' ? 'Income Added' : 'Expense Recorded',
-        body: `${category}: ₹${amount.toFixed(2)}`,
+        title: type === 'income' ? '💚 Income Added' : '🔴 Expense Recorded',
+        body: `${category}: ${formatAmount(amount, currency)}`,
         sound: true,
       },
-      trigger: null, // Show immediately
+      trigger: null,
     });
   } catch (error) {
-    // Silently fail - notifications require development build
     console.warn('Error sending transaction notification:', error);
   }
 }
-

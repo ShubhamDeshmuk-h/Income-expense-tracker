@@ -1,62 +1,87 @@
 {
   "expo": {
-    "name": "TrackExpence",
-    "slug": "TrackExpence",
-    "version": "1.0.1",
-    "runtimeVersion": "1.0.1",
+    "name": "VaultFlow",
+    "slug": "vaultflow",
+    "version": "2.0.0",
+    "runtimeVersion": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "light",
+    "newArchEnabled": true,
     "splash": {
       "image": "./assets/images/icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#3b82f6"
+      "backgroundColor": "#6C63FF"
     },
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.TrackExpence.app",
-      "buildNumber": "2"
+      "supportsTablet": false,
+      "bundleIdentifier": "com.affortechnologies.vaultflow",
+      "buildNumber": "20"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
-        "backgroundColor": "#3b82f6"
+        "backgroundColor": "#6C63FF"
       },
-      "package": "com.TrackExpence.app",
-      "versionCode": 2,
+      "package": "com.affortechnologies.vaultflow",
+      "versionCode": 20,
       "permissions": [
-        "CAMERA",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
-        "READ_MEDIA_IMAGES"
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW"
       ]
     },
     "web": {
       "favicon": "./assets/images/favicon.png"
     },
     "updates": {
-      "url": "https://u.expo.dev/your-project-id",
+      "url": "https://u.expo.dev/e75a47f0-98e0-4a46-becc-0caf782343dc",
       "enabled": true,
+      "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
     },
     "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-sqlite",
       [
         "expo-image-picker",
         {
-          "photosPermission": "The app needs access to your photos to attach bill images to transactions.",
-          "cameraPermission": "The app needs access to your camera to take photos of bills."
+          "photosPermission": "VaultFlow needs photo library access to attach receipts to transactions.",
+          "cameraPermission": "VaultFlow needs camera access to take photos of bills."
         }
       ],
       [
         "expo-notifications",
         {
           "icon": "./assets/images/icon.png",
-          "color": "#3b82f6"
+          "color": "#6C63FF",
+          "sounds": []
         }
-      ]
-    ]
+      ],
+      "expo-local-authentication",
+      "expo-file-system"
+    ],
+    "scheme": "vaultflow",
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e75a47f0-98e0-4a46-becc-0caf782343dc"
+      }
+    }
   }
 }
