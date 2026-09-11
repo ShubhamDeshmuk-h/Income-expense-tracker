@@ -113,7 +113,7 @@ export async function checkLowBalance() {
 
     const balances = await getBalanceSummary();
     const total = balances.reduce(
-      (sum, b) => sum + Number(b.current_balance),
+      (sum, b) => sum + (b.current_balance_cents / 100),
       0
     );
 

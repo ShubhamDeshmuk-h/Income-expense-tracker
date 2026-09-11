@@ -1,57 +1,95 @@
+/**
+ * VaultFlow — Database Layer
+ *
+ * All SQLite access goes through this module — no raw SQL in UI components.
+ *
+ * Money representation:
+ *   - Stored as INTEGER `amount_cents` (e.g. ₹100.50 → 10050)
+ *   - Displayed via `centsToAmount()` helper → 10050 / 100 = 100.50
+ *   - All arithmetic is done on integers to avoid floating-point errors
+ *   - Legacy `amount REAL` column kept for backward compat but not used for calculations
+ */
+
 import * as SQLite from 'expo-sqlite';
+import { runMigrations } from './migrations';
 
 let db: SQLite.SQLiteDatabase | null = null;
+let initialized = false;
 
-async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
+export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (!db) {
     db = await SQLite.openDatabaseAsync('vaultflow.db');
   }
   return db;
 }
 
-async function ensureInitialized() {
+export async function initializeDatabase(): Promise<void> {
+  if (initialized) return;
   const database = await getDatabase();
-  await database.execAsync(`
-    PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
-      mode TEXT NOT NULL DEFAULT 'cash' CHECK(mode IN ('cash', 'bank')),
-      category TEXT NOT NULL DEFAULT 'Other',
-      amount REAL NOT NULL CHECK(amount > 0),
-      date TEXT NOT NULL,
-      note TEXT DEFAULT '',
-      attachment_uri TEXT,
-      is_automated INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
-    CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
-  `);
+  await runMigrations(database);
+  initialized = true;
 }
+
+// ---------------------------------------------------------------------------
+// Money helpers
+// ---------------------------------------------------------------------------
+
+/** Converts a float amount (e.g. 100.50) to integer cents (10050). */
+export function amountToCents(amount: number): number {
+  return Math.round(amount * 100);
+}
+
+/** Converts integer cents (10050) to float amount (100.50). */
+export function centsToAmount(cents: number): number {
+  return cents / 100;
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export type PaymentMethod = 'cash' | 'bank' | 'upi' | 'card' | 'atm' | 'other';
+export type TransactionSource = 'manual' | 'sms' | 'ocr' | 'import';
 
 export type Transaction = {
   id: number;
   type: 'income' | 'expense';
-  mode: 'cash' | 'bank';
+  mode: 'cash' | 'bank'; // legacy — kept for compat
+  payment_method: PaymentMethod;
   category: string;
-  amount: number;
-  date: string;
+  merchant: string;
+  amount_cents: number; // canonical — use this for math
+  amount: number;       // legacy REAL — do not use for arithmetic
+  date: string;         // YYYY-MM-DD
   note: string;
+  tx_ref: string | null;
+  source: TransactionSource;
+  confidence: number;
   attachment_uri: string | null;
   is_automated: number;
   created_at: string;
   updated_at: string;
 };
 
-export type TransactionImport = Omit<Transaction, 'id'>;
+export type TransactionInput = {
+  type: 'income' | 'expense';
+  payment_method: PaymentMethod;
+  category: string;
+  merchant?: string;
+  amount: number; // float — converted to cents internally
+  date: string;
+  note?: string;
+  tx_ref?: string | null;
+  source?: TransactionSource;
+  confidence?: number;
+  attachment_uri?: string | null;
+};
 
 export type BalanceSummary = {
   mode: string;
-  total_income: number;
-  total_expense: number;
-  current_balance: number;
+  total_income_cents: number;
+  total_expense_cents: number;
+  current_balance_cents: number;
 };
 
 export type RestoreMergeResult = {
@@ -60,48 +98,138 @@ export type RestoreMergeResult = {
   failed: number;
 };
 
-export async function initializeDatabase() {
-  await ensureInitialized();
+export type MonthlyTrend = {
+  year: number;
+  month: number;
+  income_cents: number;
+  expense_cents: number;
+};
+
+export type CategoryBreakdown = {
+  category: string;
+  total_cents: number;
+  count: number;
+};
+
+export type MerchantBreakdown = {
+  merchant: string;
+  total_cents: number;
+  count: number;
+};
+
+// ---------------------------------------------------------------------------
+// Payment method helpers
+// ---------------------------------------------------------------------------
+
+/** Maps payment_method to its display mode (cash/bank) for backward compat */
+export function paymentMethodToMode(pm: PaymentMethod): 'cash' | 'bank' {
+  return pm === 'cash' ? 'cash' : 'bank';
 }
+
+// ---------------------------------------------------------------------------
+// CRUD — Transactions
+// ---------------------------------------------------------------------------
 
 export async function getTransactions(): Promise<Transaction[]> {
-  await ensureInitialized();
+  await initializeDatabase();
   const database = await getDatabase();
   return database.getAllAsync<Transaction>(
-    'SELECT * FROM transactions ORDER BY date DESC, created_at DESC'
+    `SELECT * FROM transactions ORDER BY date DESC, created_at DESC`
   );
 }
 
-export async function getTransactionsByDateRange(
-  startDate: string,
-  endDate: string
+/**
+ * Paginated transaction fetch for history screen.
+ * Returns `limit` records starting at `offset`.
+ */
+export async function getTransactionsPaginated(
+  offset: number,
+  limit: number
 ): Promise<Transaction[]> {
-  await ensureInitialized();
+  await initializeDatabase();
   const database = await getDatabase();
   return database.getAllAsync<Transaction>(
-    'SELECT * FROM transactions WHERE date BETWEEN ? AND ? ORDER BY date DESC',
-    [startDate, endDate]
+    `SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT ? OFFSET ?`,
+    [limit, offset]
   );
 }
 
-export async function addTransaction(
-  tx: Omit<TransactionImport, 'created_at' | 'updated_at'>
-): Promise<number> {
-  await ensureInitialized();
+/**
+ * Search transactions across merchant, note, category fields.
+ */
+export async function searchTransactions(query: string): Promise<Transaction[]> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  const pattern = `%${query.trim()}%`;
+  return database.getAllAsync<Transaction>(
+    `SELECT * FROM transactions
+     WHERE merchant LIKE ? OR note LIKE ? OR category LIKE ?
+     ORDER BY date DESC, created_at DESC
+     LIMIT 100`,
+    [pattern, pattern, pattern]
+  );
+}
+
+/**
+ * Get transactions with optional filters.
+ */
+export async function getFilteredTransactions(params: {
+  type?: 'income' | 'expense';
+  category?: string;
+  payment_method?: PaymentMethod;
+  startDate?: string;
+  endDate?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<Transaction[]> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  const conditions: string[] = [];
+  const args: (string | number)[] = [];
+
+  if (params.type) { conditions.push('type = ?'); args.push(params.type); }
+  if (params.category) { conditions.push('category = ?'); args.push(params.category); }
+  if (params.payment_method) { conditions.push('payment_method = ?'); args.push(params.payment_method); }
+  if (params.startDate) { conditions.push('date >= ?'); args.push(params.startDate); }
+  if (params.endDate) { conditions.push('date <= ?'); args.push(params.endDate); }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit = params.limit ?? 50;
+  const offset = params.offset ?? 0;
+
+  return database.getAllAsync<Transaction>(
+    `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC LIMIT ? OFFSET ?`,
+    [...args, limit, offset]
+  );
+}
+
+export async function addTransaction(input: TransactionInput): Promise<number> {
+  await initializeDatabase();
   const database = await getDatabase();
   const now = new Date().toISOString();
+  const cents = amountToCents(input.amount);
+  const mode = paymentMethodToMode(input.payment_method);
+
   const result = await database.runAsync(
-    `INSERT INTO transactions (type, mode, category, amount, date, note, attachment_uri, is_automated, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO transactions
+      (type, mode, payment_method, category, merchant, amount_cents, amount,
+       date, note, tx_ref, source, confidence, attachment_uri, is_automated, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      tx.type,
-      tx.mode,
-      tx.category,
-      tx.amount,
-      tx.date,
-      tx.note || '',
-      tx.attachment_uri || null,
-      tx.is_automated || 0,
+      input.type,
+      mode,
+      input.payment_method,
+      input.category,
+      input.merchant ?? '',
+      cents,
+      input.amount, // legacy float column
+      input.date,
+      input.note ?? '',
+      input.tx_ref ?? null,
+      input.source ?? 'manual',
+      input.confidence ?? 1.0,
+      input.attachment_uri ?? null,
+      input.source !== 'manual' ? 1 : 0,
       now,
       now,
     ]
@@ -111,215 +239,306 @@ export async function addTransaction(
 
 export async function updateTransaction(
   id: number,
-  tx: Partial<TransactionImport>
+  input: Partial<TransactionInput>
 ): Promise<void> {
-  await ensureInitialized();
+  await initializeDatabase();
   const database = await getDatabase();
   const now = new Date().toISOString();
+  const sets: string[] = [];
+  const args: (string | number | null)[] = [];
+
+  if (input.type !== undefined) { sets.push('type = ?'); args.push(input.type); }
+  if (input.payment_method !== undefined) {
+    sets.push('payment_method = ?'); args.push(input.payment_method);
+    sets.push('mode = ?'); args.push(paymentMethodToMode(input.payment_method));
+  }
+  if (input.category !== undefined) { sets.push('category = ?'); args.push(input.category); }
+  if (input.merchant !== undefined) { sets.push('merchant = ?'); args.push(input.merchant); }
+  if (input.amount !== undefined) {
+    const cents = amountToCents(input.amount);
+    sets.push('amount_cents = ?'); args.push(cents);
+    sets.push('amount = ?'); args.push(input.amount);
+  }
+  if (input.date !== undefined) { sets.push('date = ?'); args.push(input.date); }
+  if (input.note !== undefined) { sets.push('note = ?'); args.push(input.note); }
+  if (input.attachment_uri !== undefined) { sets.push('attachment_uri = ?'); args.push(input.attachment_uri ?? null); }
+
+  if (sets.length === 0) return;
+  sets.push('updated_at = ?'); args.push(now);
+  args.push(id);
+
   await database.runAsync(
-    `UPDATE transactions SET
-      type = COALESCE(?, type),
-      mode = COALESCE(?, mode),
-      category = COALESCE(?, category),
-      amount = COALESCE(?, amount),
-      date = COALESCE(?, date),
-      note = COALESCE(?, note),
-      attachment_uri = ?,
-      updated_at = ?
-     WHERE id = ?`,
-    [
-      tx.type || null,
-      tx.mode || null,
-      tx.category || null,
-      tx.amount || null,
-      tx.date || null,
-      tx.note || null,
-      tx.attachment_uri !== undefined ? tx.attachment_uri : null,
-      now,
-      id,
-    ]
+    `UPDATE transactions SET ${sets.join(', ')} WHERE id = ?`,
+    args
   );
 }
 
 export async function deleteTransaction(id: number): Promise<void> {
-  await ensureInitialized();
+  await initializeDatabase();
   const database = await getDatabase();
   await database.runAsync('DELETE FROM transactions WHERE id = ?', [id]);
 }
 
+export async function getTransactionById(id: number): Promise<Transaction | null> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  return database.getFirstAsync<Transaction>(
+    'SELECT * FROM transactions WHERE id = ?', [id]
+  ) ?? null;
+}
+
 export async function clearAllTransactions(): Promise<void> {
-  await ensureInitialized();
+  await initializeDatabase();
   const database = await getDatabase();
   await database.execAsync('DELETE FROM transactions');
 }
 
+export async function getTransactionCount(): Promise<number> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ count: number }>(
+    'SELECT COUNT(*) as count FROM transactions'
+  );
+  return row?.count ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Analytics queries
+// ---------------------------------------------------------------------------
+
 export async function getBalanceSummary(): Promise<BalanceSummary[]> {
-  await ensureInitialized();
+  await initializeDatabase();
   const database = await getDatabase();
   return database.getAllAsync<BalanceSummary>(`
     SELECT
       mode,
-      SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as total_income,
-      SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expense,
-      SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END) as current_balance
+      SUM(CASE WHEN type = 'income' THEN amount_cents ELSE 0 END) as total_income_cents,
+      SUM(CASE WHEN type = 'expense' THEN amount_cents ELSE 0 END) as total_expense_cents,
+      SUM(CASE WHEN type = 'income' THEN amount_cents ELSE -amount_cents END) as current_balance_cents
     FROM transactions
     GROUP BY mode
   `);
 }
 
-export async function getMonthlySummary(year: number, month: number) {
-  await ensureInitialized();
+export async function getMonthlySummary(
+  year: number,
+  month: number
+): Promise<{ total_income_cents: number; total_expense_cents: number }> {
+  await initializeDatabase();
   const database = await getDatabase();
   const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
   const endDate = `${year}-${String(month).padStart(2, '0')}-31`;
   const result = await database.getFirstAsync<{
-    total_income: number;
-    total_expense: number;
+    total_income_cents: number;
+    total_expense_cents: number;
   }>(
     `SELECT
-      SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as total_income,
-      SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expense
+      SUM(CASE WHEN type = 'income' THEN amount_cents ELSE 0 END) as total_income_cents,
+      SUM(CASE WHEN type = 'expense' THEN amount_cents ELSE 0 END) as total_expense_cents
      FROM transactions WHERE date BETWEEN ? AND ?`,
     [startDate, endDate]
   );
-  return result || { total_income: 0, total_expense: 0 };
+  return result ?? { total_income_cents: 0, total_expense_cents: 0 };
 }
 
 export async function getCategoryBreakdown(
   type: 'income' | 'expense',
   startDate?: string,
   endDate?: string
-) {
-  await ensureInitialized();
+): Promise<CategoryBreakdown[]> {
+  await initializeDatabase();
   const database = await getDatabase();
-  const dateFilter =
-    startDate && endDate ? 'AND date BETWEEN ? AND ?' : '';
+  const dateFilter = startDate && endDate ? 'AND date BETWEEN ? AND ?' : '';
   const params: (string | number)[] = [type];
   if (startDate && endDate) params.push(startDate, endDate);
 
-  return database.getAllAsync<{ category: string; total: number; count: number }>(
-    `SELECT category, SUM(amount) as total, COUNT(*) as count
+  return database.getAllAsync<CategoryBreakdown>(
+    `SELECT category, SUM(amount_cents) as total_cents, COUNT(*) as count
      FROM transactions WHERE type = ? ${dateFilter}
-     GROUP BY category ORDER BY total DESC`,
+     GROUP BY category ORDER BY total_cents DESC`,
     params
   );
 }
 
-export async function replaceAllTransactions(
-  records: TransactionImport[]
-): Promise<void> {
-  await ensureInitialized();
+/**
+ * Returns monthly income/expense trend for the last N months.
+ * Used for sparkline charts on dashboard.
+ */
+export async function getMonthlyTrend(months: number = 6): Promise<MonthlyTrend[]> {
+  await initializeDatabase();
   const database = await getDatabase();
-  await database.execAsync('DELETE FROM transactions');
-  for (const record of records) {
-    await database.runAsync(
-      `INSERT INTO transactions (type, mode, category, amount, date, note, attachment_uri, is_automated, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        record.type,
-        record.mode,
-        record.category,
-        record.amount,
-        record.date,
-        record.note || '',
-        record.attachment_uri || null,
-        record.is_automated || 0,
-        record.created_at || new Date().toISOString(),
-        record.updated_at || record.created_at || new Date().toISOString(),
-      ]
-    );
-  }
+  return database.getAllAsync<MonthlyTrend>(
+    `SELECT
+      CAST(strftime('%Y', date) AS INTEGER) as year,
+      CAST(strftime('%m', date) AS INTEGER) as month,
+      SUM(CASE WHEN type = 'income' THEN amount_cents ELSE 0 END) as income_cents,
+      SUM(CASE WHEN type = 'expense' THEN amount_cents ELSE 0 END) as expense_cents
+     FROM transactions
+     WHERE date >= date('now', ? || ' months')
+     GROUP BY year, month
+     ORDER BY year ASC, month ASC`,
+    [`-${months}`]
+  );
 }
 
-function normalizeTextValue(input?: string | null) {
-  return (input || '').trim().toLowerCase().replace(/\s+/g, ' ');
+/**
+ * Returns top merchants by spend in a given period.
+ */
+export async function getMerchantBreakdown(
+  type: 'income' | 'expense',
+  startDate?: string,
+  endDate?: string,
+  limit: number = 10
+): Promise<MerchantBreakdown[]> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  const dateFilter = startDate && endDate ? 'AND date BETWEEN ? AND ?' : '';
+  const params: (string | number)[] = [type];
+  if (startDate && endDate) params.push(startDate, endDate);
+  params.push(limit);
+
+  return database.getAllAsync<MerchantBreakdown>(
+    `SELECT
+      CASE WHEN merchant = '' THEN category ELSE merchant END as merchant,
+      SUM(amount_cents) as total_cents,
+      COUNT(*) as count
+     FROM transactions
+     WHERE type = ? AND (merchant != '' OR category != '') ${dateFilter}
+     GROUP BY merchant
+     ORDER BY total_cents DESC
+     LIMIT ?`,
+    params
+  );
 }
 
-function buildDedupeKey(
-  record: Pick<
-    TransactionImport,
-    'type' | 'mode' | 'category' | 'amount' | 'date' | 'note'
-  >
-) {
-  const amount = Number(record.amount || 0).toFixed(2);
-  return [
-    record.type,
-    record.mode,
-    normalizeTextValue(record.category),
-    amount,
-    record.date,
-    normalizeTextValue(record.note),
-  ].join('|');
+export async function getTransactionsByDateRange(
+  startDate: string,
+  endDate: string
+): Promise<Transaction[]> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  return database.getAllAsync<Transaction>(
+    'SELECT * FROM transactions WHERE date BETWEEN ? AND ? ORDER BY date DESC',
+    [startDate, endDate]
+  );
 }
 
+// ---------------------------------------------------------------------------
+// Backup / Restore
+// ---------------------------------------------------------------------------
+
+/** Fetch all transactions for backup export. */
+export async function getAllTransactionsForBackup(): Promise<Transaction[]> {
+  return getTransactions();
+}
+
+/**
+ * Replaces all transactions (used in full restore).
+ * Runs in a transaction for safety.
+ */
+export async function replaceAllTransactions(
+  records: TransactionInput[]
+): Promise<void> {
+  await initializeDatabase();
+  const database = await getDatabase();
+  await database.withTransactionAsync(async () => {
+    await database.execAsync('DELETE FROM transactions');
+    for (const record of records) {
+      const cents = amountToCents(record.amount);
+      const mode = paymentMethodToMode(record.payment_method);
+      const now = new Date().toISOString();
+      await database.runAsync(
+        `INSERT INTO transactions
+          (type, mode, payment_method, category, merchant, amount_cents, amount,
+           date, note, tx_ref, source, confidence, attachment_uri, is_automated, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          record.type,
+          mode,
+          record.payment_method,
+          record.category,
+          record.merchant ?? '',
+          cents,
+          record.amount,
+          record.date,
+          record.note ?? '',
+          record.tx_ref ?? null,
+          record.source ?? 'import',
+          record.confidence ?? 1.0,
+          record.attachment_uri ?? null,
+          1,
+          now,
+          now,
+        ]
+      );
+    }
+  });
+}
+
+/**
+ * Merge-restores transactions from a backup with duplicate detection.
+ * Duplicate key: type + payment_method + category + amount_cents + date + normalized_note
+ */
 export async function mergeTransactions(
-  records: TransactionImport[]
+  records: TransactionInput[]
 ): Promise<RestoreMergeResult> {
-  await ensureInitialized();
+  await initializeDatabase();
   const existing = await getTransactions();
+
+  function buildKey(r: {
+    type: string;
+    payment_method: string;
+    category: string;
+    amount: number;
+    date: string;
+    note: string;
+    tx_ref?: string | null;
+  }): string {
+    const cents = amountToCents(Number(r.amount) || 0);
+    const note = (r.note ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    // If tx_ref is present, it's the canonical dedup key
+    if (r.tx_ref) return `txref:${r.tx_ref}`;
+    return `${r.type}|${r.payment_method}|${r.category.toLowerCase()}|${cents}|${r.date}|${note}`;
+  }
+
   const existingKeys = new Set(
-    existing.map((item) =>
-      buildDedupeKey({
-        type: item.type,
-        mode: item.mode,
-        category: item.category,
-        amount: Number(item.amount),
-        date: item.date,
-        note: item.note || '',
-      })
-    )
+    existing.map((t) => buildKey({
+      type: t.type,
+      payment_method: t.payment_method,
+      category: t.category,
+      amount: centsToAmount(t.amount_cents),
+      date: t.date,
+      note: t.note,
+      tx_ref: t.tx_ref,
+    }))
   );
 
   let imported = 0;
   let skipped = 0;
   let failed = 0;
-  const database = await getDatabase();
 
   for (const record of records) {
-    const normalized: TransactionImport = {
-      type: record.type === 'income' ? 'income' : 'expense',
-      mode: record.mode === 'bank' ? 'bank' : 'cash',
-      category: record.category || 'Other',
-      amount: Number(record.amount) || 0,
-      date: record.date || new Date().toISOString().split('T')[0],
-      note: record.note || '',
-      attachment_uri: record.attachment_uri || null,
-      is_automated: record.is_automated || 0,
-      created_at: record.created_at || new Date().toISOString(),
-      updated_at:
-        record.updated_at || record.created_at || new Date().toISOString(),
-    };
-
-    if (normalized.amount <= 0) {
+    if (!record.type || !record.date || !record.amount || record.amount <= 0) {
       failed += 1;
       continue;
     }
-
-    const dedupeKey = buildDedupeKey(normalized);
-    if (existingKeys.has(dedupeKey)) {
+    const key = buildKey({
+      type: record.type,
+      payment_method: record.payment_method ?? 'cash',
+      category: record.category,
+      amount: record.amount,
+      date: record.date,
+      note: record.note ?? '',
+      tx_ref: record.tx_ref,
+    });
+    if (existingKeys.has(key)) {
       skipped += 1;
       continue;
     }
-
     try {
-      await database.runAsync(
-        `INSERT INTO transactions (type, mode, category, amount, date, note, attachment_uri, is_automated, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          normalized.type,
-          normalized.mode,
-          normalized.category,
-          normalized.amount,
-          normalized.date,
-          normalized.note,
-          normalized.attachment_uri || null,
-          normalized.is_automated || 0,
-          normalized.created_at,
-          normalized.updated_at,
-        ]
-      );
+      await addTransaction({ ...record, source: record.source ?? 'import' });
+      existingKeys.add(key);
       imported += 1;
-      existingKeys.add(dedupeKey);
     } catch {
       failed += 1;
     }

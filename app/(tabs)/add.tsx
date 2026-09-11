@@ -1,22 +1,15 @@
 import { useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TextInput,
-  TouchableOpacity,
-  Alert,
-  Linking,
-  ActivityIndicator,
+  View, Text, StyleSheet, ScrollView, TextInput,
+  TouchableOpacity, Alert, ActivityIndicator, Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
-import { Plus, Camera, Image, FileText, ChevronDown } from 'lucide-react-native';
-import { addTransaction } from '@/lib/db';
-import { parseTransactionFromText } from '@/lib/ocr';
+import { Plus, Camera, Image as ImageIcon, FileText, ChevronDown } from 'lucide-react-native';
+import { addTransaction, type PaymentMethod } from '@/lib/db';
+import { parseTransactionText } from '@/lib/smsParser';
 import { sendTransactionNotification, checkLargeTransaction, checkLowBalance } from '@/lib/notifications';
 import { useCurrencyPreference } from '@/hooks/useCurrencyPreference';
 import { formatAmount } from '@/lib/currency';
@@ -27,182 +20,173 @@ const CATEGORIES = [
   'Entertainment', 'Salary', 'Transfer', 'Other',
 ];
 
+const PAYMENT_METHODS: { key: PaymentMethod; label: string; icon: string }[] = [
+  { key: 'cash', label: 'Cash', icon: '💵' },
+  { key: 'bank', label: 'Bank', icon: '🏦' },
+  { key: 'upi', label: 'UPI', icon: '📱' },
+  { key: 'card', label: 'Card', icon: '💳' },
+  { key: 'atm', label: 'ATM', icon: '🏧' },
+];
+
+type FormState = {
+  type: 'income' | 'expense';
+  paymentMethod: PaymentMethod;
+  amount: string;
+  category: string;
+  merchant: string;
+  date: string;
+  note: string;
+  attachmentUri: string | null;
+};
+
+const defaultForm = (): FormState => ({
+  type: 'expense',
+  paymentMethod: 'cash',
+  amount: '',
+  category: 'Other',
+  merchant: '',
+  date: new Date().toISOString().split('T')[0],
+  note: '',
+  attachmentUri: null,
+});
+
 export default function AddTransaction() {
   const insets = useSafeAreaInsets();
   const currency = useCurrencyPreference();
-
-  const [type, setType] = useState<'income' | 'expense'>('expense');
-  const [mode, setMode] = useState<'cash' | 'bank'>('cash');
-  const [amount, setAmount] = useState('');
-  const [category, setCategory] = useState('Other');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-  const [note, setNote] = useState('');
-  const [attachmentUri, setAttachmentUri] = useState<string | null>(null);
+  const [form, setForm] = useState<FormState>(defaultForm());
   const [smsText, setSmsText] = useState('');
   const [showSmsParser, setShowSmsParser] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const openSettingsPrompt = (message: string) => {
-    Alert.alert('Permission Required', message, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Open Settings', onPress: () => Linking.openSettings() },
-    ]);
-  };
+  const set = (key: keyof FormState, val: FormState[keyof FormState]) =>
+    setForm((prev) => ({ ...prev, [key]: val }));
 
-  const ensureMediaLibraryPermission = async () => {
-    const perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+  // ---------------------------------------------------------------------------
+  // Permissions
+  // ---------------------------------------------------------------------------
+
+  const ensureMediaPermission = async (type: 'gallery' | 'camera'): Promise<boolean> => {
+    const getter = type === 'gallery'
+      ? ImagePicker.getMediaLibraryPermissionsAsync
+      : ImagePicker.getCameraPermissionsAsync;
+    const requester = type === 'gallery'
+      ? ImagePicker.requestMediaLibraryPermissionsAsync
+      : ImagePicker.requestCameraPermissionsAsync;
+    const perm = await getter();
     if (perm.granted) return true;
-    const req = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (req.granted) return true;
-    if (!req.canAskAgain) {
-      openSettingsPrompt('Photo access is disabled. Enable it in Settings to attach receipts.');
-    } else {
-      Alert.alert('Permission Needed', 'Please allow photo library access.');
-    }
-    return false;
+    const req = await requester();
+    return req.granted;
   };
 
-  const ensureCameraPermission = async () => {
-    const perm = await ImagePicker.getCameraPermissionsAsync();
-    if (perm.granted) return true;
-    const req = await ImagePicker.requestCameraPermissionsAsync();
-    if (req.granted) return true;
-    if (!req.canAskAgain) {
-      openSettingsPrompt('Camera access is disabled. Enable it in Settings.');
-    } else {
-      Alert.alert('Permission Needed', 'Please allow camera access.');
-    }
-    return false;
-  };
-
-  const applyParsedResult = (parsed: ReturnType<typeof parseTransactionFromText>) => {
-    if (parsed.amount) setAmount(parsed.amount.toString());
-    if (parsed.type) setType(parsed.type);
-    if (parsed.date) setDate(parsed.date);
-    if (parsed.note) setNote(parsed.note);
-    if (parsed.category) setCategory(parsed.category);
-  };
+  // ---------------------------------------------------------------------------
+  // SMS Parser
+  // ---------------------------------------------------------------------------
 
   const handleParseSMS = () => {
     if (!smsText.trim()) {
       Alert.alert('Empty', 'Paste an SMS or UPI message to parse.');
       return;
     }
-    const parsed = parseTransactionFromText(smsText);
+    const result = parseTransactionText(smsText);
+    const confidenceLabel = result.confidence >= 0.8 ? '✅ High confidence'
+      : result.confidence >= 0.6 ? '⚠️ Medium confidence — please review'
+      : '❓ Low confidence — review carefully';
+
     const summary = [
-      parsed.amount ? `Amount: ${formatAmount(parsed.amount, currency)}` : 'Amount: –',
-      parsed.date ? `Date: ${parsed.date}` : 'Date: –',
-      parsed.type ? `Type: ${parsed.type}` : 'Type: –',
-      parsed.note ? `Note: ${parsed.note}` : 'Note: –',
+      `Amount: ${result.amount != null ? formatAmount(result.amount, currency) : '–'}`,
+      `Type: ${result.type ?? '–'}`,
+      `Date: ${result.date ?? '–'}`,
+      `Merchant: ${result.merchant ?? '–'}`,
+      `Category: ${result.category ?? '–'}`,
+      `Payment: ${result.paymentMethod ?? '–'}`,
+      '',
+      confidenceLabel,
     ].join('\n');
+
     Alert.alert('Parsed Result', summary, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Apply', onPress: () => applyParsedResult(parsed) },
+      {
+        text: 'Apply',
+        onPress: () => {
+          setForm((prev) => ({
+            ...prev,
+            ...(result.amount != null ? { amount: String(result.amount) } : {}),
+            ...(result.type ? { type: result.type } : {}),
+            ...(result.date ? { date: result.date } : {}),
+            ...(result.merchant ? { merchant: result.merchant } : {}),
+            ...(result.category ? { category: result.category } : {}),
+            ...(result.paymentMethod ? { paymentMethod: result.paymentMethod } : {}),
+            ...(result.txRef ? { note: `Ref: ${result.txRef}` } : {}),
+          }));
+        },
+      },
     ]);
   };
 
-  const handlePickFromGallery = async () => {
-    const granted = await ensureMediaLibraryPermission();
-    if (!granted) return;
+  // ---------------------------------------------------------------------------
+  // Camera / Gallery
+  // ---------------------------------------------------------------------------
 
+  const handlePickGallery = async () => {
+    const granted = await ensureMediaPermission('gallery');
+    if (!granted) { Alert.alert('Permission Required', 'Enable photo access in Settings.'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8,
     });
-
-    if (!result.canceled && result.assets[0]) {
-      setAttachmentUri(result.assets[0].uri);
-    }
+    if (!result.canceled && result.assets[0]) set('attachmentUri', result.assets[0].uri);
   };
 
-  const handleTakePhoto = async () => {
-    const granted = await ensureCameraPermission();
-    if (!granted) return;
-
+  const handleCamera = async () => {
+    const granted = await ensureMediaPermission('camera');
+    if (!granted) { Alert.alert('Permission Required', 'Enable camera access in Settings.'); return; }
     const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
-    if (!result.canceled && result.assets[0]) {
-      setAttachmentUri(result.assets[0].uri);
-    }
+    if (!result.canceled && result.assets[0]) set('attachmentUri', result.assets[0].uri);
   };
 
-  const handleScanOCR = async () => {
-    const granted = await ensureMediaLibraryPermission();
-    if (!granted) return;
-
-    setOcrLoading(true);
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        quality: 0.9,
-      });
-
-      if (result.canceled || !result.assets[0]) return;
-
-      // Simulate OCR parse from filename/path context (real OCR needs native module)
-      const parsed = parseTransactionFromText(result.assets[0].uri);
-      const summary = [
-        parsed.amount ? `Amount: ${formatAmount(parsed.amount, currency)}` : 'Amount: –',
-        parsed.date ? `Date: ${parsed.date}` : 'Date: –',
-        parsed.type ? `Type: ${parsed.type}` : 'Type: –',
-      ].join('\n');
-
-      Alert.alert('Scan Results', summary + '\n\nTip: Paste the receipt text in the SMS parser for better accuracy.', [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Apply + Attach',
-          onPress: () => {
-            setAttachmentUri(result.assets[0].uri);
-            applyParsedResult(parsed);
-          },
-        },
-        { text: 'Apply', onPress: () => applyParsedResult(parsed) },
-      ]);
-    } finally {
-      setOcrLoading(false);
-    }
-  };
+  // ---------------------------------------------------------------------------
+  // Save
+  // ---------------------------------------------------------------------------
 
   const handleSave = async () => {
-    const numAmount = parseFloat(amount);
-    if (!amount || isNaN(numAmount) || numAmount <= 0) {
-      Alert.alert('Invalid Amount', 'Please enter a valid positive amount.');
+    const numAmount = parseFloat(form.amount);
+    if (!form.amount || isNaN(numAmount) || numAmount <= 0) {
+      Alert.alert('Invalid Amount', 'Enter a valid positive amount.');
       return;
     }
-    if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      Alert.alert('Invalid Date', 'Use YYYY-MM-DD format.');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.date)) {
+      Alert.alert('Invalid Date', 'Use YYYY-MM-DD format (e.g. 2025-09-12).');
       return;
     }
 
     setSaving(true);
     try {
       await addTransaction({
-        type,
-        mode,
-        category,
+        type: form.type,
+        payment_method: form.paymentMethod,
+        category: form.category,
+        merchant: form.merchant.trim(),
         amount: numAmount,
-        date,
-        note,
-        attachment_uri: attachmentUri,
-        is_automated: 0,
+        date: form.date,
+        note: form.note.trim(),
+        source: 'manual',
+        confidence: 1.0,
+        attachment_uri: form.attachmentUri,
       });
 
-      await sendTransactionNotification(type, numAmount, category);
+      await sendTransactionNotification(form.type, numAmount, form.category);
       await checkLargeTransaction(numAmount);
       await checkLowBalance();
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      // Reset form
-      setAmount('');
-      setNote('');
+      setForm(defaultForm());
       setSmsText('');
-      setAttachmentUri(null);
       setShowSmsParser(false);
 
-      Alert.alert('Saved!', `${type === 'income' ? 'Income' : 'Expense'} of ${formatAmount(numAmount, currency)} recorded.`);
-    } catch (err) {
-      Alert.alert('Error', 'Failed to save transaction. Please try again.');
+      Alert.alert('✅ Saved', `${form.type === 'income' ? 'Income' : 'Expense'} of ${formatAmount(numAmount, currency)} recorded.`);
+    } catch {
+      Alert.alert('Error', 'Could not save transaction. Please try again.');
     } finally {
       setSaving(false);
     }
@@ -211,45 +195,52 @@ export default function AddTransaction() {
   return (
     <ScrollView
       style={styles.container}
-      contentContainerStyle={[
-        styles.content,
-        { paddingBottom: Math.max(insets.bottom, 16) + 80 },
-      ]}>
-      {/* Header */}
+      contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, 16) + 80 }]}
+      keyboardShouldPersistTaps="handled"
+    >
       <LinearGradient
         colors={[theme.colors.primaryDark, theme.colors.primary]}
-        style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 12 }]}>
+        style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 8 }]}
+      >
         <Text style={styles.headerTitle}>Add Transaction</Text>
         <Text style={styles.headerSub}>Log income or expense</Text>
       </LinearGradient>
 
       <View style={styles.form}>
-        {/* Type Toggle */}
+        {/* Type toggle */}
         <View style={styles.typeRow}>
-          <TouchableOpacity
-            style={[styles.typeBtn, type === 'expense' && styles.typeBtnExpense]}
-            onPress={() => setType('expense')}>
-            <Text style={[styles.typeBtnText, type === 'expense' && { color: '#fff' }]}>Expense</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.typeBtn, type === 'income' && styles.typeBtnIncome]}
-            onPress={() => setType('income')}>
-            <Text style={[styles.typeBtnText, type === 'income' && { color: '#fff' }]}>Income</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Mode Toggle */}
-        <View style={styles.modeRow}>
-          {(['cash', 'bank'] as const).map((m) => (
+          {(['expense', 'income'] as const).map((t) => (
             <TouchableOpacity
-              key={m}
-              style={[styles.modeBtn, mode === m && styles.modeBtnActive]}
-              onPress={() => setMode(m)}>
-              <Text style={[styles.modeBtnText, mode === m && { color: '#fff' }]}>
-                {m.charAt(0).toUpperCase() + m.slice(1)}
+              key={t}
+              style={[styles.typeBtn, form.type === t && (t === 'expense' ? styles.typeBtnExpense : styles.typeBtnIncome)]}
+              onPress={() => set('type', t)}
+            >
+              <Text style={[styles.typeBtnText, form.type === t && { color: '#fff' }]}>
+                {t === 'expense' ? '↓ Expense' : '↑ Income'}
               </Text>
             </TouchableOpacity>
           ))}
+        </View>
+
+        {/* Payment method */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Payment Method</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 52 }}>
+            <View style={{ flexDirection: 'row', gap: 8, paddingVertical: 4 }}>
+              {PAYMENT_METHODS.map(({ key, label, icon }) => (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.pmChip, form.paymentMethod === key && styles.pmChipActive]}
+                  onPress={() => set('paymentMethod', key)}
+                >
+                  <Text style={styles.pmChipIcon}>{icon}</Text>
+                  <Text style={[styles.pmChipText, form.paymentMethod === key && { color: '#fff' }]}>
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
         </View>
 
         {/* Amount */}
@@ -258,25 +249,42 @@ export default function AddTransaction() {
           <TextInput
             style={styles.input}
             keyboardType="decimal-pad"
-            placeholder={`0.00`}
+            placeholder="0.00"
             placeholderTextColor={theme.colors.textMuted}
-            value={amount}
-            onChangeText={setAmount}
+            value={form.amount}
+            onChangeText={(v) => set('amount', v)}
+          />
+        </View>
+
+        {/* Merchant */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Merchant / Payee</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="e.g. Swiggy, Amazon, Salary"
+            placeholderTextColor={theme.colors.textMuted}
+            value={form.merchant}
+            onChangeText={(v) => set('merchant', v)}
           />
         </View>
 
         {/* Category */}
         <View style={styles.fieldGroup}>
           <Text style={styles.label}>Category</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll}>
-            {CATEGORIES.map((cat) => (
-              <TouchableOpacity
-                key={cat}
-                style={[styles.catChip, category === cat && styles.catChipActive]}
-                onPress={() => setCategory(cat)}>
-                <Text style={[styles.catChipText, category === cat && { color: '#fff' }]}>{cat}</Text>
-              </TouchableOpacity>
-            ))}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 44 }}>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {CATEGORIES.map((cat) => (
+                <TouchableOpacity
+                  key={cat}
+                  style={[styles.catChip, form.category === cat && styles.catChipActive]}
+                  onPress={() => set('category', cat)}
+                >
+                  <Text style={[styles.catChipText, form.category === cat && { color: '#fff' }]}>
+                    {cat}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </ScrollView>
         </View>
 
@@ -285,10 +293,10 @@ export default function AddTransaction() {
           <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
           <TextInput
             style={styles.input}
-            placeholder="2025-01-01"
+            placeholder="2025-09-12"
             placeholderTextColor={theme.colors.textMuted}
-            value={date}
-            onChangeText={setDate}
+            value={form.date}
+            onChangeText={(v) => set('date', v)}
           />
         </View>
 
@@ -297,58 +305,59 @@ export default function AddTransaction() {
           <Text style={styles.label}>Note (optional)</Text>
           <TextInput
             style={[styles.input, styles.noteInput]}
-            multiline
-            numberOfLines={3}
+            multiline numberOfLines={3}
             placeholder="What was this for?"
             placeholderTextColor={theme.colors.textMuted}
-            value={note}
-            onChangeText={setNote}
+            value={form.note}
+            onChangeText={(v) => set('note', v)}
           />
         </View>
 
         {/* Attachment */}
-        {attachmentUri && (
-          <View style={styles.attachmentRow}>
-            <Text style={styles.attachmentText}>📎 Receipt attached</Text>
-            <TouchableOpacity onPress={() => setAttachmentUri(null)}>
-              <Text style={styles.removeAttachment}>Remove</Text>
+        {form.attachmentUri && (
+          <View style={styles.attachRow}>
+            <Text style={styles.attachText}>📎 Receipt attached</Text>
+            <TouchableOpacity onPress={() => set('attachmentUri', null)}>
+              <Text style={styles.removeAttach}>Remove</Text>
             </TouchableOpacity>
           </View>
         )}
 
-        {/* Media Actions */}
+        {/* Media actions */}
         <View style={styles.mediaRow}>
-          <TouchableOpacity style={styles.mediaBtn} onPress={handlePickFromGallery}>
-            <Image size={18} color={theme.colors.primary} />
+          <TouchableOpacity style={styles.mediaBtn} onPress={handlePickGallery}>
+            <ImageIcon size={16} color={theme.colors.primary} />
             <Text style={styles.mediaBtnText}>Gallery</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.mediaBtn} onPress={handleTakePhoto}>
-            <Camera size={18} color={theme.colors.primary} />
+          <TouchableOpacity style={styles.mediaBtn} onPress={handleCamera}>
+            <Camera size={16} color={theme.colors.primary} />
             <Text style={styles.mediaBtnText}>Camera</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.mediaBtn} onPress={handleScanOCR} disabled={ocrLoading}>
-            {ocrLoading
-              ? <ActivityIndicator size={18} color={theme.colors.primary} />
-              : <FileText size={18} color={theme.colors.primary} />}
-            <Text style={styles.mediaBtnText}>Scan OCR</Text>
           </TouchableOpacity>
         </View>
 
-        {/* SMS/UPI Parser */}
+        {/* SMS/UPI parser */}
         <TouchableOpacity
           style={styles.smsToggle}
-          onPress={() => setShowSmsParser(!showSmsParser)}>
-          <Text style={styles.smsToggleText}>Autofill from UPI/SMS</Text>
-          <ChevronDown size={16} color={theme.colors.primary} style={{ transform: [{ rotate: showSmsParser ? '180deg' : '0deg' }] }} />
+          onPress={() => setShowSmsParser((p) => !p)}
+        >
+          <FileText size={16} color={theme.colors.primary} />
+          <Text style={styles.smsToggleText}>Autofill from UPI / Bank SMS</Text>
+          <ChevronDown
+            size={16}
+            color={theme.colors.primary}
+            style={{ transform: [{ rotate: showSmsParser ? '180deg' : '0deg' }] }}
+          />
         </TouchableOpacity>
 
         {showSmsParser && (
           <View style={styles.smsBox}>
+            <Text style={styles.smsHint}>
+              Paste a bank debit/credit SMS or UPI confirmation message. Parsing is 100% on-device.
+            </Text>
             <TextInput
               style={[styles.input, styles.smsInput]}
-              multiline
-              numberOfLines={5}
-              placeholder="Paste UPI confirmation SMS here…"
+              multiline numberOfLines={5}
+              placeholder="Paste UPI or bank SMS here…"
               placeholderTextColor={theme.colors.textMuted}
               value={smsText}
               onChangeText={setSmsText}
@@ -359,19 +368,22 @@ export default function AddTransaction() {
           </View>
         )}
 
-        {/* Save Button */}
+        {/* Save */}
         <TouchableOpacity
           style={[styles.saveBtn, saving && { opacity: 0.7 }]}
           onPress={handleSave}
-          disabled={saving}>
-          <LinearGradient colors={[theme.colors.primary, theme.colors.primaryDark]} style={styles.saveBtnGradient}>
+          disabled={saving}
+        >
+          <LinearGradient
+            colors={[theme.colors.primary, theme.colors.primaryDark]}
+            style={styles.saveBtnGradient}
+          >
             {saving
               ? <ActivityIndicator color="#fff" />
               : <>
                   <Plus size={20} color="#fff" />
                   <Text style={styles.saveBtnText}>Save Transaction</Text>
-                </>
-            }
+                </>}
           </LinearGradient>
         </TouchableOpacity>
       </View>
@@ -391,53 +403,74 @@ const styles = StyleSheet.create({
   headerTitle: { ...theme.typography.title, color: '#fff' },
   headerSub: { ...theme.typography.subtitle, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
   form: { padding: theme.spacing.lg, gap: theme.spacing.md },
-  typeRow: { flexDirection: 'row', backgroundColor: theme.colors.surfaceElevated, borderRadius: theme.radius.md, padding: 4, gap: 4 },
+  typeRow: {
+    flexDirection: 'row',
+    backgroundColor: theme.colors.surfaceElevated,
+    borderRadius: theme.radius.md, padding: 4, gap: 4,
+  },
   typeBtn: { flex: 1, paddingVertical: 10, borderRadius: theme.radius.sm, alignItems: 'center' },
   typeBtnExpense: { backgroundColor: theme.colors.expense },
   typeBtnIncome: { backgroundColor: theme.colors.income },
   typeBtnText: { ...theme.typography.label, color: theme.colors.textSecondary },
-  modeRow: { flexDirection: 'row', gap: 8 },
-  modeBtn: { flex: 1, paddingVertical: 10, borderRadius: theme.radius.sm, borderWidth: 1.5, borderColor: theme.colors.border, alignItems: 'center' },
-  modeBtnActive: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
-  modeBtnText: { ...theme.typography.label, color: theme.colors.textSecondary },
   fieldGroup: { gap: 6 },
   label: { ...theme.typography.label, color: theme.colors.textSecondary },
   input: {
     backgroundColor: theme.colors.surface,
-    borderWidth: 1.5,
-    borderColor: theme.colors.border,
+    borderWidth: 1.5, borderColor: theme.colors.border,
     borderRadius: theme.radius.md,
-    paddingHorizontal: theme.spacing.md,
-    paddingVertical: 12,
-    ...theme.typography.body,
-    color: theme.colors.text,
+    paddingHorizontal: theme.spacing.md, paddingVertical: 12,
+    ...theme.typography.body, color: theme.colors.text,
   },
   noteInput: { height: 80, textAlignVertical: 'top' },
-  catScroll: { maxHeight: 44 },
-  catChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+  pmChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 14, paddingVertical: 8,
     borderRadius: theme.radius.full,
     backgroundColor: theme.colors.surfaceElevated,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
+    borderWidth: 1, borderColor: theme.colors.border,
+  },
+  pmChipActive: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
+  pmChipIcon: { fontSize: 14 },
+  pmChipText: { ...theme.typography.label, color: theme.colors.textSecondary },
+  catChip: {
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1, borderColor: theme.colors.border,
   },
   catChipActive: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
   catChipText: { ...theme.typography.label, color: theme.colors.textSecondary },
-  attachmentRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: theme.colors.successLight, padding: theme.spacing.sm, borderRadius: theme.radius.sm },
-  attachmentText: { ...theme.typography.label, color: theme.colors.success },
-  removeAttachment: { ...theme.typography.label, color: theme.colors.expense },
+  attachRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: theme.colors.successLight, padding: theme.spacing.sm,
+    borderRadius: theme.radius.sm,
+  },
+  attachText: { ...theme.typography.label, color: theme.colors.success },
+  removeAttach: { ...theme.typography.label, color: theme.colors.expense },
   mediaRow: { flexDirection: 'row', gap: 8 },
-  mediaBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border },
+  mediaBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingVertical: 10,
+    backgroundColor: theme.colors.surface, borderRadius: theme.radius.md,
+    borderWidth: 1, borderColor: theme.colors.border,
+  },
   mediaBtnText: { ...theme.typography.label, color: theme.colors.primary },
-  smsToggle: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: theme.spacing.md, backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border },
-  smsToggleText: { ...theme.typography.label, color: theme.colors.primary },
-  smsBox: { gap: 8 },
+  smsToggle: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.surface, borderRadius: theme.radius.md,
+    borderWidth: 1, borderColor: theme.colors.border,
+  },
+  smsToggleText: { ...theme.typography.label, color: theme.colors.primary, flex: 1, marginLeft: 8 },
+  smsBox: { gap: 10 },
+  smsHint: { ...theme.typography.caption, color: theme.colors.textMuted, lineHeight: 18 },
   smsInput: { height: 100, textAlignVertical: 'top' },
   parseBtn: { backgroundColor: theme.colors.primary, borderRadius: theme.radius.md, padding: 12, alignItems: 'center' },
   parseBtnText: { ...theme.typography.label, color: '#fff' },
   saveBtn: { marginTop: 8 },
-  saveBtnGradient: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: theme.radius.lg, paddingVertical: 16 },
+  saveBtnGradient: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, borderRadius: theme.radius.lg, paddingVertical: 16,
+  },
   saveBtnText: { ...theme.typography.heading, color: '#fff' },
 });

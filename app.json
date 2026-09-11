@@ -72,7 +72,9 @@
         }
       ],
       "expo-local-authentication",
-      "expo-file-system"
+      "expo-file-system",
+      "expo-font",
+      "expo-web-browser"
     ],
     "scheme": "vaultflow",
     "experiments": {
