@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "update:preview": "eas update --branch preview --message \"Update preview build\"",
     "update:production": "eas update --branch production --message \"Update production build\"",
-    "update:check": "eas update:list"
+    "update:check": "eas update:list",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
@@ -36,6 +38,7 @@
     "expo-secure-store": "^15.0.7",
     "expo-sharing": "^14.0.7",
     "expo-splash-screen": "~31.0.10",
+    "expo-sqlite": "~16.0.10",
     "expo-status-bar": "~3.0.8",
     "expo-symbols": "~1.0.7",
     "expo-system-ui": "~6.0.8",
