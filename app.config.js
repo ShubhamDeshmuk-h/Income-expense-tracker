@@ -17,9 +17,7 @@ module.exports = ({ config }) => {
       checkAutomatically: 'ON_LOAD',
       fallbackToCacheTimeout: 0,
     },
-    runtimeVersion: {
-      policy: 'sdkVersion',
-    },
+    runtimeVersion: '2.0.0',
     extra: {
       ...config.extra,
       EXPO_PUBLIC_SUPABASE_URL: process.env.EXPO_PUBLIC_SUPABASE_URL || 'https://kihgmhodhbwaocugeygz.supabase.co',
